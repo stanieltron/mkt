@@ -1,0 +1,22 @@
+export const ORACLE_ABI = [
+  "error InvalidAddress()",
+  "error InvalidSqrtPrice()",
+  "error InvalidTokenDecimals()",
+  "error InvalidTokenPair()",
+  "error Unauthorized()",
+  "function owner() view returns (address)",
+  "function pendingOwner() view returns (address)",
+  "function USDC() view returns (address)",
+  "function WETH() view returns (address)",
+  "function pool() view returns (address)",
+  "function wethIsToken0() view returns (bool)",
+  "function wethUnit() view returns (uint256)",
+  "function usdcToE18Scale() view returns (uint256)",
+  "function getPriceE18() view returns (uint256 priceE18)",
+  "function setPool(address newPool)",
+  "function transferOwnership(address newOwner)",
+  "function acceptOwnership()",
+  "event PoolSet(address indexed previousPool,address indexed newPool)",
+  "event OwnershipTransferStarted(address indexed previousOwner,address indexed pendingOwner)",
+  "event OwnershipTransferred(address indexed previousOwner,address indexed newOwner)"
+];

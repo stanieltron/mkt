@@ -1,0 +1,45 @@
+{
+  "scenarioName": "model-v4-synthetic-crawl-model2-full",
+  "generatedAt": "2026-04-01T13:58:08.933Z",
+  "result": {
+    "model": "v4",
+    "scenarioType": "synthetic-crawl-model2-full",
+    "scenarioLabel": "Synthetic crawl bridge: 78,000 sequential 100x long trades across a 6.5x baseline rise",
+    "config": {
+      "startPrice": 3000,
+      "endPrice": 19500,
+      "targetTrades": 78000,
+      "startWETH": "12.000000",
+      "grossMarginUSDC": "10.000000",
+      "netMarginUSDC": "9.900000",
+      "totalFeeUSDC": "0.100000",
+      "protocolFeeUSDC": "0.030000",
+      "lpFeeUSDC": "0.070000",
+      "leverage": 100,
+      "profitTargetPpm": 1000000,
+      "tpProbability": 0.4934,
+      "priceStepPerTrade": 0.21153846153846154,
+      "pathDescription": "one trade opens at each baseline point, closes at its exact TP or SL, then the baseline drifts upward by a fixed increment"
+    },
+    "results": {
+      "startPrice": "3000.00",
+      "endPrice": "19500.00",
+      "startWETH": "12.000000",
+      "startPoolValueUSD": "36000.000000",
+      "endWETH": "14.980917",
+      "endUSDC": "2340.000000",
+      "endPoolValueUSD": "294467.895465",
+      "holdOnlyEndValueUSD": "234000.000000",
+      "poolVsHoldUSD": "60467.895465",
+      "tradesClosed": 78000,
+      "tpCount": 38434,
+      "slCount": 39566,
+      "tpRatePct": 49.274358974358975,
+      "slRatePct": 50.725641025641025,
+      "totalProtocolTradePnlUSDC": "11206.800000",
+      "protocolFeesAccruedUSDC": "2340.000000",
+      "maxRequiredWETH": "0.330000",
+      "maxRequiredWETHAtPrice": "3000.00"
+    }
+  }
+}

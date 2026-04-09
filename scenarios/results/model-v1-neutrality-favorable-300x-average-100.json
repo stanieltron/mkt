@@ -1,0 +1,36 @@
+{
+  "scenarioName": "model-v1-neutrality-favorable-300x-average-100",
+  "generatedAt": "2026-03-27T11:56:50.713Z",
+  "result": {
+    "model": "v1",
+    "scenarioType": "neutrality_favorable_average100",
+    "regime": "neutral",
+    "leverage": 300,
+    "feeBps": 0,
+    "targetProfitUSDC": 10,
+    "targetTrades": 10000,
+    "constrainedEnding": {
+      "snapPrice": 3000,
+      "snapThresholdOpenTrades": 100,
+      "cancelRemainingOpenTrades": true
+    },
+    "averages": {
+      "openedLongs": 10000,
+      "closeSuccess": 9995.02,
+      "tp": 5016.37,
+      "sl": 4978.65,
+      "tpAbove3000": 2661.65,
+      "tpBelow3000": 2346.86,
+      "tpAt3000": 7.86,
+      "canceled": 4.98,
+      "endPrice": 3.0000000000000016e+21,
+      "endUSDC": 49786500000,
+      "endWETH": 83174641491106730000,
+      "endEquity": 299310424472.86,
+      "holdOnlyEnd": 300000000000,
+      "poolVsHold": -689575527.14,
+      "longTradePnl": 377.2,
+      "poolTradePnl": -377.2
+    }
+  }
+}

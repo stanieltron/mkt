@@ -1,0 +1,45 @@
+{
+  "scenarioName": "model-v4-reverse-model4-one-slice-300x",
+  "generatedAt": "2026-04-01T14:16:29.882Z",
+  "result": {
+    "model": "v4",
+    "scenarioType": "historical-replay-model4-one-slice-reverse",
+    "scenarioLabel": "Historical ETH 1m replay in reverse order, one sequential 300x long slice with capacity ignored",
+    "dataset": {
+      "files": 103,
+      "candlesProcessed": 4481118,
+      "firstMinuteIso": "2026-02-28T23:59:00.000Z",
+      "lastMinuteIso": "2017-08-17T04:00:00.000Z"
+    },
+    "config": {
+      "dataOrder": "reverse-chronological",
+      "grossMarginUSDC": "10.000000",
+      "netMarginUSDC": "9.700000",
+      "totalFeeUSDC": "0.300000",
+      "protocolFeeUSDC": "0.090000",
+      "lpFeeUSDC": "0.210000",
+      "leverage": 300,
+      "notionalUSDC": "2910.000000",
+      "targetProfitUSDC": "9.700000"
+    },
+    "results": {
+      "tradesClosed": 438121,
+      "tpCount": 210602,
+      "slCount": 227519,
+      "tpRatePct": 48.06936896428156,
+      "slRatePct": 51.93063103571844,
+      "ambiguousBothHitCount": 13644,
+      "avgDurationMinutes": 10.247570876538672,
+      "medianDurationMinutes": 4,
+      "p95DurationMinutes": 40,
+      "totalProtocolTradePnlUSDC": "164094.900000",
+      "grossFeesUSDC": "131436.300000",
+      "protocolFeesUSDC": "39430.890000",
+      "lpFeesUSDC": "92005.410000",
+      "maxRequiredWETH": "35.466179",
+      "maxRequiredUSDCBacking": "2910.000000",
+      "maxRequiredWETHAtPrice": "82.05",
+      "maxRequiredWETHAtOpenTimeIso": "2018-12-15T16:01:00.000Z"
+    }
+  }
+}

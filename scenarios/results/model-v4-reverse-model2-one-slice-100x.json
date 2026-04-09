@@ -1,0 +1,52 @@
+{
+  "scenarioName": "model-v4-reverse-model2-one-slice-100x",
+  "generatedAt": "2026-04-01T14:14:59.392Z",
+  "result": {
+    "model": "v4",
+    "scenarioType": "model-v4-reverse-model2-one-slice-100x-reverse",
+    "scenarioLabel": "Historical ETH 1m replay in reverse order, one sequential 100x long slice funded with reverse Model 1 max backing",
+    "dataset": {
+      "files": 103,
+      "candlesProcessed": 4481118,
+      "firstMinuteIso": "2026-02-28T23:59:00.000Z",
+      "lastMinuteIso": "2017-08-17T04:00:00.000Z"
+    },
+    "config": {
+      "dataOrder": "reverse-chronological",
+      "startWETH": "12.036474",
+      "startWETHSource": "reverse Model 1 max single-slice backing",
+      "grossMarginUSDC": "10.000000",
+      "netMarginUSDC": "9.900000",
+      "totalFeeUSDC": "0.100000",
+      "protocolFeeUSDC": "0.030000",
+      "lpFeeUSDC": "0.070000",
+      "leverage": 100,
+      "notionalUSDC": "990.000000"
+    },
+    "results": {
+      "tradesClosed": 67455,
+      "tpCount": 33439,
+      "slCount": 34016,
+      "tpRatePct": 49.572307464235415,
+      "slRatePct": 50.427692535764585,
+      "ambiguousBothHitCount": 561,
+      "avgDurationMinutes": 66.55680083018308,
+      "medianDurationMinutes": 19,
+      "p95DurationMinutes": 286,
+      "startPrice": "1965.01",
+      "endPrice": "301.13",
+      "startWETH": "12.036474",
+      "startPoolValueUSD": "23651.912462",
+      "endWETH": "48.115249",
+      "endUSDC": "2033.860000",
+      "endPoolValueUSD": "16522.804984",
+      "holdOnlyEndValueUSD": "3624.543465",
+      "poolVsHoldUSD": "12898.261519",
+      "totalProtocolTradePnlUSDC": "5712.300000",
+      "protocolFeesAccruedUSDC": "2023.680000",
+      "maxRequiredWETH": "12.036474",
+      "maxRequiredWETHAtPrice": "82.25",
+      "maxRequiredWETHAtOpenTimeIso": "2018-12-14T21:54:00.000Z"
+    }
+  }
+}

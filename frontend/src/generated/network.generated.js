@@ -1,0 +1,20 @@
+export const GENERATED_NETWORK = {
+  "chainId": 31337,
+  "chainName": "Anvil Local",
+  "makeit": "0xa82fF9aFd8f496c3d6ac40E2a0F282E47488CFc9",
+  "protocolVariant": "default",
+  "backendProtocolVariant": "default",
+  "defaultProtocolVariant": "default",
+  "oracle": "0xc3e53F4d16Ae77Db1c982e75a937B9f60FE63690",
+  "swapAdapter": "0x84eA74d481Ee0A5332c457a4d796187F6Ba67fEB",
+  "usdc": "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
+  "usdt": "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
+  "weth": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
+  "pool": "0x9D187010A2Aac0C8057393B21A2C2Ce089D2f5a7",
+  "rpcUrl": "http://127.0.0.1:8545",
+  "backendUrl": "http://localhost:8787",
+  "localMode": true,
+  "adminDefaultUser": "admin",
+  "adminDefaultPassword": "admin123",
+  "updatedAt": "2026-04-09T08:06:22.183Z"
+};

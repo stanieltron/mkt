@@ -1,0 +1,3 @@
+[
+  {"type":"function","name":"getPriceE18","inputs":[],"outputs":[{"name":"","type":"uint256"}],"stateMutability":"view"}
+]

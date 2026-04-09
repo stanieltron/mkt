@@ -1,0 +1,66 @@
+{
+  "scenarioName": "model-v4-historical-model6-openflow-300x-36weth",
+  "generatedAt": "2026-04-01T12:05:20.567Z",
+  "result": {
+    "model": "v4",
+    "scenarioType": "historical-replay-model6-openflow",
+    "scenarioLabel": "Historical ETH 1m replay, 36 WETH pool, open long every minute if possible and open short every minute if offset exists at 300x",
+    "dataset": {
+      "files": 103,
+      "candlesProcessed": 4481118,
+      "firstMinuteIso": "2017-08-17T04:00:00.000Z",
+      "lastMinuteIso": "2026-02-28T23:59:00.000Z"
+    },
+    "config": {
+      "startWETH": "36.000000",
+      "grossMarginUSDC": "10.000000",
+      "netMarginUSDC": "9.700000",
+      "totalFeeUSDC": "0.300000",
+      "protocolFeeUSDC": "0.090000",
+      "lpFeeUSDC": "0.210000",
+      "leverage": 300,
+      "notionalUSDC": "2910.000000",
+      "openingPolicy": {
+        "longs": "attempt one new 300x long at every candle open",
+        "shorts": "attempt one new 300x short at every candle open only if offset is available",
+        "liquidation": "existing trades checked against current candle high/low; SL first if both hit",
+        "sameCandleEligibility": "newly opened trades become eligible starting next candle",
+        "maxConcurrentTrades": 10
+      }
+    },
+    "results": {
+      "startPrice": "301.13",
+      "endPrice": "1964.51",
+      "startWETH": "36.000000",
+      "startPoolValueUSD": "10840.680000",
+      "endWETH": "1786.269914",
+      "endUSDC": "274750.900000",
+      "endPoolValueUSD": "3783896.010445",
+      "holdOnlyEndValueUSD": "70722.360000",
+      "poolVsHoldUSD": "3713173.650445",
+      "openedLongs": 1525848,
+      "openedShorts": 1525848,
+      "tradesClosed": 3051686,
+      "closedLongTp": 755130,
+      "closedLongSl": 770713,
+      "closedShortTp": 761512,
+      "closedShortSl": 764331,
+      "longOpenFailInsufficientEthCoverage": 0,
+      "shortOpenFailNoLongOffset": 0,
+      "otherOpenFailures": 0,
+      "ambiguousBothHitCount": 18402,
+      "maxSimultaneousOpenTrades": 10,
+      "avgLongDurationMinutes": 12.801855105669457,
+      "medianLongDurationMinutes": 5,
+      "p95LongDurationMinutes": 49,
+      "avgShortDurationMinutes": 12.801855105669457,
+      "medianShortDurationMinutes": 5,
+      "p95ShortDurationMinutes": 49,
+      "totalProtocolTradePnlUSDC": "178499.400000",
+      "protocolFeesAccruedUSDC": "274652.640000",
+      "maxRequiredWETH": "35.479151",
+      "maxRequiredWETHAtPrice": "82.02",
+      "maxRequiredWETHAtOpenTimeIso": "2018-12-15T15:52:00.000Z"
+    }
+  }
+}

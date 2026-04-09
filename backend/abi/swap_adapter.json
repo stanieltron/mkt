@@ -1,0 +1,6 @@
+[
+  {"type":"function","name":"USDC","inputs":[],"outputs":[{"name":"","type":"address"}],"stateMutability":"view"},
+  {"type":"function","name":"WETH","inputs":[],"outputs":[{"name":"","type":"address"}],"stateMutability":"view"},
+  {"type":"function","name":"buyWETHWithExactUSDC","inputs":[{"name":"usdcIn6","type":"uint256"},{"name":"payer","type":"address"},{"name":"recipient","type":"address"}],"outputs":[{"name":"usdcSpent6","type":"uint256"},{"name":"wethOut18","type":"uint256"}],"stateMutability":"nonpayable"},
+  {"type":"function","name":"sellWETHForExactUSDC","inputs":[{"name":"usdcNeeded6","type":"uint256"},{"name":"payer","type":"address"},{"name":"recipient","type":"address"}],"outputs":[{"name":"wethSold18","type":"uint256"},{"name":"usdcOut6","type":"uint256"}],"stateMutability":"nonpayable"}
+]

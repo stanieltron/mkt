@@ -1,0 +1,55 @@
+{
+  "scenarioName": "model-v4-historical-one-slice-100x",
+  "generatedAt": "2026-04-01T08:39:45.352Z",
+  "result": {
+    "model": "v4",
+    "scenarioType": "historical-replay-one-slice",
+    "scenarioLabel": "Historical ETH 1m replay, one sequential 100x long slice",
+    "dataset": {
+      "files": 103,
+      "candlesProcessed": 4481118,
+      "firstMinuteIso": "2017-08-17T04:00:00.000Z",
+      "lastMinuteIso": "2026-02-28T23:59:00.000Z"
+    },
+    "config": {
+      "grossMarginUSDC": "10.000000",
+      "netMarginUSDC": "9.900000",
+      "totalFeeUSDC": "0.100000",
+      "protocolFeeUSDC": "0.030000",
+      "lpFeeUSDC": "0.070000",
+      "leverage": 100,
+      "notionalUSDC": "990.000000",
+      "tpMovePct": "1.00%",
+      "slMovePct": "1.00%",
+      "assumptions": {
+        "side": "LONG_ONLY",
+        "openRule": "open at candle open after previous trade is closed",
+        "liquidationRule": "first future candle whose high hits TP or low hits SL",
+        "ambiguousHitRule": "SL first if TP and SL are both inside the same candle",
+        "capacityRule": "always allow opening; track required ETH backing separately"
+      }
+    },
+    "results": {
+      "tradesClosed": 78007,
+      "tpCount": 38487,
+      "slCount": 39520,
+      "tpRatePct": 49.33787993385209,
+      "slRatePct": 50.66212006614791,
+      "ambiguousBothHitCount": 301,
+      "totalTraderPnlUSDC": "-10226.700000",
+      "totalProtocolTradePnlUSDC": "10226.700000",
+      "totalGrossFeesUSDC": "7800.700000",
+      "totalProtocolFeesUSDC": "2340.210000",
+      "totalLpFeesUSDC": "5460.490000",
+      "netProtocolEconomicsUSDC": "18027.400000",
+      "avgDurationMinutes": 57.553706718627815,
+      "medianDurationMinutes": 12,
+      "p95DurationMinutes": 261,
+      "maxRequiredWETH": "11.992731",
+      "maxRequiredUSDC": "990.000000",
+      "maxActualUsdcEquivalentFromWethBacking": "990.000000",
+      "maxRequiredWETHAtPrice": "82.55",
+      "maxRequiredWETHAtOpenTimeIso": "2018-12-07T17:34:00.000Z"
+    }
+  }
+}

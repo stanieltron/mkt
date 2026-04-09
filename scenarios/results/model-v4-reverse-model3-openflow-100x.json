@@ -1,0 +1,62 @@
+{
+  "scenarioName": "model-v4-reverse-model3-openflow-100x",
+  "generatedAt": "2026-04-01T14:15:46.393Z",
+  "result": {
+    "model": "v4",
+    "scenarioType": "model-v4-reverse-model3-openflow-100x-reverse",
+    "scenarioLabel": "Historical ETH 1m replay in reverse order, 100x open-flow with reverse Model 1 max backing and 10 concurrent trades",
+    "dataset": {
+      "files": 103,
+      "candlesProcessed": 4481118,
+      "firstMinuteIso": "2026-02-28T23:59:00.000Z",
+      "lastMinuteIso": "2017-08-17T04:00:00.000Z"
+    },
+    "config": {
+      "dataOrder": "reverse-chronological",
+      "startWETH": "12.036474",
+      "startWETHSource": "reverse Model 1 max single-slice backing",
+      "grossMarginUSDC": "10.000000",
+      "netMarginUSDC": "9.900000",
+      "totalFeeUSDC": "0.100000",
+      "protocolFeeUSDC": "0.030000",
+      "lpFeeUSDC": "0.070000",
+      "leverage": 100,
+      "notionalUSDC": "990.000000",
+      "maxConcurrentTrades": 10
+    },
+    "results": {
+      "startPrice": "1965.01",
+      "endPrice": "301.13",
+      "startWETH": "12.036474",
+      "startPoolValueUSD": "23651.912462",
+      "endWETH": "146.673058",
+      "endUSDC": "17474.080000",
+      "endPoolValueUSD": "61641.738141",
+      "holdOnlyEndValueUSD": "3624.543465",
+      "poolVsHoldUSD": "58017.194676",
+      "openedLongs": 289580,
+      "openedShorts": 289580,
+      "tradesClosed": 579150,
+      "closedLongTp": 142051,
+      "closedLongSl": 147524,
+      "closedShortTp": 146555,
+      "closedShortSl": 143020,
+      "longOpenFailInsufficientEthCoverage": 0,
+      "shortOpenFailNoLongOffset": 0,
+      "otherOpenFailures": 0,
+      "ambiguousBothHitCount": 1938,
+      "maxSimultaneousOpenTrades": 10,
+      "avgLongDurationMinutes": 76.63195372528706,
+      "medianLongDurationMinutes": 25,
+      "p95LongDurationMinutes": 317,
+      "avgShortDurationMinutes": 76.63195372528706,
+      "medianShortDurationMinutes": 25,
+      "p95ShortDurationMinutes": 317,
+      "totalProtocolTradePnlUSDC": "19186.200000",
+      "protocolFeesAccruedUSDC": "17374.800000",
+      "maxRequiredWETH": "12.070226",
+      "maxRequiredWETHAtPrice": "82.02",
+      "maxRequiredWETHAtOpenTimeIso": "2018-12-15T15:52:00.000Z"
+    }
+  }
+}

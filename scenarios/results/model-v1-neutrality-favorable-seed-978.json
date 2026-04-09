@@ -1,0 +1,37 @@
+{
+  "scenarioName": "model-v1-neutrality-favorable-seed-978",
+  "generatedAt": "2026-03-27T12:01:34.742Z",
+  "result": {
+    "model": "v1",
+    "scenarioType": "neutrality_favorable_single_seed",
+    "regime": "neutral",
+    "seed": 978,
+    "leverage": 100,
+    "feeBps": 0,
+    "targetProfitUSDC": 10,
+    "targetTrades": 10000,
+    "constrainedEnding": {
+      "snapPrice": 3000,
+      "snapThresholdOpenTrades": 100,
+      "cancelRemainingOpenTrades": true
+    },
+    "result": {
+      "openedLongs": 10000,
+      "closeSuccess": 9985,
+      "endPrice": "3000000000000000000000",
+      "endUSDC": "53360000000",
+      "endWETH": "86978719472240368687",
+      "endEquity": "314296158416",
+      "holdOnlyEnd": "300000000000",
+      "poolVsHold": "14296158416",
+      "tp": 4649,
+      "sl": 5336,
+      "tpAbove3000": 4649,
+      "tpBelow3000": 0,
+      "tpAt3000": 0,
+      "canceled": 15,
+      "longTradePnl": -6870,
+      "poolTradePnl": 6870
+    }
+  }
+}
