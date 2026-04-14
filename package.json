@@ -7,7 +7,7 @@
     "// --- INSTALL (run once or let individual scripts handle it) ---": "",
     "install:foundry": "node scripts/install-foundry.js",
     "install:all": "npm run install:foundry && npm ci && npm --prefix frontend ci && cargo fetch --manifest-path backend/Cargo.toml",
-    "install:prod": "npm ci && npm --prefix frontend ci && cargo fetch --manifest-path backend/Cargo.toml",
+    "install:prod": "npm --prefix frontend ci && cargo fetch --manifest-path backend/Cargo.toml",
 
     "// --- DEVELOPMENT ---": "",
     "dev:fe": "npm --prefix frontend ci && npm --prefix frontend run dev",
@@ -33,7 +33,7 @@
 
     "// --- PRODUCTION BUILD & START ---": "",
     "build": "npm run install:prod && cargo build --manifest-path backend/Cargo.toml --release && npm --prefix frontend run build",
-    "start": "npm run build && node scripts/start-stack.js",
+    "start": "node scripts/start-stack.js",
     "start:fresh": "node scripts/db-up.js --fresh && node scripts/db-init-rust.js --fresh && npm start"
   },
   "author": "",
