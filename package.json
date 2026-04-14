@@ -15,6 +15,7 @@
     "dev": "npm run install:all && node scripts/dev-rust.js --fresh",
     "local:chain": "node scripts/run-local-chain.js",
     "local:chain:fresh": "node scripts/run-local-chain.js --fresh",
+    "railway:local:chain:fresh": "node scripts/railway-anvil.js",
     "run:be": "node scripts/run-backend.js",
     "run:be:local": "node scripts/run-backend.js --local",
     "run:be:local:fresh": "node scripts/run-backend.js --local --fresh",
