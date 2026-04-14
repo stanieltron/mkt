@@ -9,10 +9,11 @@ import { apiGet, apiPost } from "../lib/api";
 
 const RANGE_OPTIONS = ["15m", "1h", "6h", "1d"];
 const TRADE_PRESETS = [
-  { pace: "Slow", leverage: 100 },
-  { pace: "Fast", leverage: 200 },
-  { pace: "Faster", leverage: 300 },
+  { id: "a", pace: "normal", leverage: 100 },
+  { id: "b", pace: "fast", leverage: 200 },
+  { id: "c", pace: "faster", leverage: 300 },
 ];
+const PROFIT_TARGET_OPTIONS = [5, 10, 20, 30];
 const RANGE_WINDOW_SECONDS = {
   "15m": 15 * 60,
   "1h": 60 * 60,
@@ -23,9 +24,8 @@ const OPEN_TRADE_TOLERANCE_BPS = 150;
 const PROFIT_PPM_SCALE = 1_000_000n;
 const REFERRAL_PENDING_KEY = "willgo.pending_referral_code";
 const REFERRAL_REFRESH_INTERVAL_MS = 20_000;
-const BACKEND_PRICE_POLL_MS = 1_000;
-const BACKEND_TRADES_POLL_MS = 1_000;
-const ONCHAIN_PROTOCOL_POLL_MS = 1_000;
+const ONCHAIN_PROTOCOL_POLL_MS = 10_000;
+const QUOTE_TOKEN_DECIMALS = Number(ACTIVE_NETWORK.usdcDecimals || 6);
 
 function fmt(value, digits = 2) {
   if (!Number.isFinite(value)) return "-";
@@ -54,7 +54,7 @@ function decodeTxErrorMessage(err) {
     "";
   const combined = `${text} ${String(revertData || "")}`;
   if (combined.includes("0x7939f424")) {
-    return "USDC transfer failed. Approve USDC first, and make sure the wallet has enough USDC balance.";
+    return "USD transfer failed. Approve USD first, and make sure the wallet has enough USD balance.";
   }
   if (text.includes("MustUseLiquidation")) {
     return "TP/SL already hit; trade must be liquidated instead of early close.";
@@ -73,7 +73,7 @@ function decodeTxErrorMessage(err) {
 
 function usdc6ToNumber(value) {
   try {
-    return Number(formatUnits(BigInt(value), 6));
+    return Number(formatUnits(BigInt(value), QUOTE_TOKEN_DECIMALS));
   } catch {
     return 0;
   }
@@ -84,6 +84,14 @@ function e18ToNumber(value) {
     return Number(formatUnits(BigInt(value), 18));
   } catch {
     return 0;
+  }
+}
+
+function rawToBigInt(value) {
+  try {
+    return BigInt(value ?? 0);
+  } catch {
+    return 0n;
   }
 }
 
@@ -120,10 +128,37 @@ function tradeSoldEth(trade) {
 }
 
 function normalizeDisplayPrice(value) {
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric)) return 0;
-  const human = numeric > 1_000_000_000 ? numeric / 1e18 : numeric;
-  return Number(human.toFixed(4));
+  if (value === null || value === undefined) return 0;
+  if (typeof value === "number") {
+    return Number.isFinite(value) && value > 0 ? value : 0;
+  }
+
+  const raw = String(value).trim();
+  if (!raw) return 0;
+
+  // Decimal strings are treated as already human-readable prices.
+  if (raw.includes(".") || raw.includes("e") || raw.includes("E")) {
+    const direct = Number(raw);
+    return Number.isFinite(direct) && direct > 0 ? direct : 0;
+  }
+
+  try {
+    const asBigInt = BigInt(raw);
+    const abs = asBigInt < 0n ? -asBigInt : asBigInt;
+
+    // Most oracle values are E18-scaled ints; plain integer prices (e.g. "2000")
+    // can exist in older rows and should not be scaled down to near-zero.
+    if (abs >= 1_000_000_000_000n) {
+      const scaled = Number(formatUnits(asBigInt, 18));
+      return Number.isFinite(scaled) && scaled > 0 ? scaled : 0;
+    }
+
+    const direct = Number(asBigInt);
+    return Number.isFinite(direct) && direct > 0 ? direct : 0;
+  } catch {
+    const fallback = Number(raw);
+    return Number.isFinite(fallback) && fallback > 0 ? fallback : 0;
+  }
 }
 
 function closedStatusToLabel(status) {
@@ -144,18 +179,17 @@ function grossToNetMarginUsdc6(grossMarginUsdc6, totalFeePpm) {
   return gross - fee;
 }
 
-function targetProfitPpmForGrossPlusTen(grossMarginUsdc6, totalFeePpm) {
+function targetProfitPpmForDesiredPnl(grossMarginUsdc6, totalFeePpm, desiredPnlUsdc) {
   const gross = BigInt(grossMarginUsdc6 || 0n);
   const feePpm = BigInt(totalFeePpm || 0n);
   if (gross <= 0n) return 1_000_000n;
 
-  // Fee is charged from gross margin on open, so TP must be scaled from net margin.
   const fee = (gross * feePpm) / PROFIT_PPM_SCALE;
   const net = gross - fee;
   if (net <= 0n) return 1_000_000n;
 
-  // We target payout ~= 2x gross margin (net + pnl = 2 * gross), so desired pnl is gross + fee.
-  const desiredPnl = gross + fee;
+  const desired = Number(desiredPnlUsdc || 0);
+  const desiredPnl = desired > 0 ? BigInt(Math.round(desired * 1_000_000)) : gross;
   return (desiredPnl * PROFIT_PPM_SCALE + net - 1n) / net;
 }
 
@@ -200,7 +234,7 @@ function moveFractionFromPpm(tpPpm, leverage) {
   return ppm / 1_000_000 / lev;
 }
 
-function buildTradePreview(side, leverage, currentPrice, marginUsdc6, totalFeePpm) {
+function buildTradePreview(side, leverage, currentPrice, marginUsdc6, totalFeePpm, desiredPnlUsdc = 10) {
   const entryPrice = Number(currentPrice || 0);
   const grossMargin = usdc6ToNumber(marginUsdc6 || 0n);
   if (!Number.isFinite(entryPrice) || entryPrice <= 0 || !Number.isFinite(grossMargin) || grossMargin <= 0) {
@@ -208,7 +242,7 @@ function buildTradePreview(side, leverage, currentPrice, marginUsdc6, totalFeePp
   }
 
   const totalFee = BigInt(totalFeePpm || 0n);
-  const tpPpm = targetProfitPpmForGrossPlusTen(marginUsdc6, totalFee);
+  const tpPpm = targetProfitPpmForDesiredPnl(marginUsdc6, totalFee, desiredPnlUsdc);
   const tpMoveFraction = moveFractionFromPpm(tpPpm, leverage);
   const slMoveFraction = 1 / Number(leverage || 1);
   const netMarginUsdc6 = grossToNetMarginUsdc6(marginUsdc6, totalFee);
@@ -216,6 +250,8 @@ function buildTradePreview(side, leverage, currentPrice, marginUsdc6, totalFeePp
   const feeUsdc = grossMargin - netMarginUsdc;
   const netProfitUsdc = netMarginUsdc * Number(tpPpm) / 1_000_000;
   const payoutUsdc = netMarginUsdc + netProfitUsdc;
+  const notionalUsdc = grossMargin * Number(leverage || 0);
+  const feePctOfNotional = notionalUsdc > 0 ? (feeUsdc / notionalUsdc) * 100 : 0;
 
   const tpPrice =
     side === "SHORT" ? entryPrice * (1 - tpMoveFraction) : entryPrice * (1 + tpMoveFraction);
@@ -231,7 +267,10 @@ function buildTradePreview(side, leverage, currentPrice, marginUsdc6, totalFeePp
     tpMovePct: tpMoveFraction * 100,
     slMovePct: slMoveFraction * 100,
     feeUsdc,
+    feePctOfNotional,
     grossMarginUsdc: grossMargin,
+    notionalUsdc,
+    targetProfitUsdc: desiredPnlUsdc,
     takeProfitPnlUsdc: netProfitUsdc,
     stopLossPnlUsdc: grossMargin,
     payoutUsdc,
@@ -239,7 +278,46 @@ function buildTradePreview(side, leverage, currentPrice, marginUsdc6, totalFeePp
   };
 }
 
-function buildTradeChartLines(trade, { strong = false, includeEntry = false, titlePrefix = "" } = {}) {
+function resolvePreviewAtPrice(preview, currentPrice) {
+  if (!preview) return null;
+  const liveEntryPrice = Number(currentPrice || 0);
+  if (!Number.isFinite(liveEntryPrice) || liveEntryPrice <= 0) return preview;
+
+  const tpMoveFraction = Number(preview.tpMovePct || 0) / 100;
+  const slMoveFraction = Number(preview.slMovePct || 0) / 100;
+  const isShort = preview.side === "SHORT";
+  const tpPrice = isShort
+    ? liveEntryPrice * (1 - tpMoveFraction)
+    : liveEntryPrice * (1 + tpMoveFraction);
+  const slPrice = isShort
+    ? liveEntryPrice * (1 + slMoveFraction)
+    : liveEntryPrice * (1 - slMoveFraction);
+
+  return {
+    ...preview,
+    entryPrice: liveEntryPrice,
+    tpPrice,
+    slPrice,
+  };
+}
+
+function buildTradeChartLines(
+  trade,
+  {
+    strong = false,
+    includeEntry = false,
+    titlePrefix = "",
+    tpTitle = null,
+    slTitle = null,
+    tpCustomLabel = null,
+    slCustomLabel = null,
+    tpCustomLabelPosition = "above",
+    slCustomLabelPosition = "below",
+    compactLabel = false,
+    showTpLabel = true,
+    showSlLabel = true,
+  } = {}
+) {
   const entry = tradeEntryPriceUsdc(trade);
   const tp = tradeTpPriceUsdc(trade);
   const sl = tradeSlPriceUsdc(trade);
@@ -256,23 +334,39 @@ function buildTradeChartLines(trade, { strong = false, includeEntry = false, tit
     });
   }
   if (Number.isFinite(tp) && tp > 0) {
+    const effectiveTpTitle = tpTitle ?? `${prefix}TP`;
+    const tpPnl = tradeTpTargetPnlUsdc(trade);
+    const tradeTag = tradeId ? `#${tradeId}` : "trade";
+    const tpCompactLabel = compactLabel && showTpLabel ? `${tradeTag} + USD ${fmt(tpPnl, 2)} @ ${fmt(tp, 4)}` : tpCustomLabel;
     lines.push({
       value: tp,
       color: strong ? "rgba(42, 222, 134, 0.95)" : "rgba(42, 222, 134, 0.38)",
-      title: strong ? `${prefix}TP` : `${prefix}TP`,
+      title: compactLabel ? "" : effectiveTpTitle,
       lineWidth: strong ? 3 : 1,
-      axisLabelVisible: true,
-      lastValueVisible: true,
+      axisLabelVisible: compactLabel ? false : true,
+      lastValueVisible: compactLabel ? false : true,
+      customLabel: tpCompactLabel,
+      customLabelPosition: tpCustomLabelPosition,
+      customLabelSize: compactLabel ? "small" : undefined,
+      customLabelOffset: compactLabel ? -10 : undefined,
     });
   }
   if (Number.isFinite(sl) && sl > 0) {
+    const effectiveSlTitle = slTitle ?? `${prefix}SL`;
+    const margin = tradeMarginUsdc(trade);
+    const tradeTag = tradeId ? `#${tradeId}` : "trade";
+    const slCompactLabel = compactLabel && showSlLabel ? `${tradeTag} - USD ${fmt(margin, 2)} @ ${fmt(sl, 4)}` : slCustomLabel;
     lines.push({
       value: sl,
       color: strong ? "rgba(255, 107, 99, 0.95)" : "rgba(255, 107, 99, 0.34)",
-      title: strong ? `${prefix}SL` : `${prefix}SL`,
+      title: compactLabel ? "" : effectiveSlTitle,
       lineWidth: strong ? 3 : 1,
-      axisLabelVisible: true,
-      lastValueVisible: true,
+      axisLabelVisible: compactLabel ? false : true,
+      lastValueVisible: compactLabel ? false : true,
+      customLabel: slCompactLabel,
+      customLabelPosition: slCustomLabelPosition,
+      customLabelSize: compactLabel ? "small" : undefined,
+      customLabelOffset: compactLabel ? 10 : undefined,
     });
   }
   return lines;
@@ -320,7 +414,7 @@ function normalizeChartSeries(points, maxPoints = 9000) {
   for (const item of points || []) {
     const time = Number(item?.time);
     const value = Number(item?.value);
-    if (!Number.isFinite(time) || !Number.isFinite(value)) continue;
+    if (!Number.isFinite(time) || !Number.isFinite(value) || value <= 0) continue;
     latestByTime.set(time, { time, value });
   }
 
@@ -417,6 +511,27 @@ function computeLive(trade, currentPrice) {
   return { pnl };
 }
 
+function tradeTpTargetPnlUsdc(trade) {
+  const entry = tradeEntryPriceUsdc(trade);
+  const tp = tradeTpPriceUsdc(trade);
+  const margin = tradeMarginUsdc(trade);
+  const leverage = Number(trade?.leverage || 0);
+  if (
+    !Number.isFinite(entry) ||
+    entry <= 0 ||
+    !Number.isFinite(tp) ||
+    tp <= 0 ||
+    !Number.isFinite(margin) ||
+    margin <= 0 ||
+    !Number.isFinite(leverage) ||
+    leverage <= 0
+  ) {
+    return Math.max(0, margin || 0);
+  }
+  const notional = margin * leverage;
+  return Math.max(0, notional * (Math.abs(tp - entry) / entry));
+}
+
 function hasTradePnl(trade) {
   const raw = trade?.pnl;
   if (raw === null || raw === undefined) return false;
@@ -498,6 +613,88 @@ function displayClosedPnlUsdc(trade, baseTotalFeePpm, feeScaleFactorPpm, protoco
 
   const openFee = estimateOpenFeeUsdc(trade, baseTotalFeePpm, feeScaleFactorPpm, protocolVariant);
   return realizedPnl - openFee;
+}
+
+function formatTradeTimestamp(value) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "-";
+  return date.toLocaleString(undefined, {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+}
+
+function explainClosedPnlMath(trade, baseTotalFeePpm, feeScaleFactorPpm, protocolVariant) {
+  const side = getTradeDirection(trade);
+  const entry = tradeEntryPriceUsdc(trade);
+  const exit = tradeExitPriceUsdc(trade);
+  const margin = tradeMarginUsdc(trade);
+  const leverage = Number(trade?.leverage || 0);
+  if (!Number.isFinite(entry) || entry <= 0 || !Number.isFinite(exit) || exit <= 0 || !Number.isFinite(margin) || margin <= 0 || !Number.isFinite(leverage) || leverage <= 0) {
+    return "-";
+  }
+
+  const notional = margin * leverage;
+  const movePct = side === "SHORT" ? ((entry - exit) / entry) * 100 : ((exit - entry) / entry) * 100;
+  const moveExpr = side === "SHORT"
+    ? `(${fmt(entry, 4)} - ${fmt(exit, 4)}) / ${fmt(entry, 4)}`
+    : `(${fmt(exit, 4)} - ${fmt(entry, 4)}) / ${fmt(entry, 4)}`;
+  const grossPnl = notional * (movePct / 100);
+  const openFee = estimateOpenFeeUsdc(trade, baseTotalFeePpm, feeScaleFactorPpm, protocolVariant);
+  const netPnl = grossPnl - openFee;
+
+  return `${side} -> ${moveExpr} = ${fmt(movePct, 4)}%; ` +
+    `notional ${fmt(notional, 2)} = margin ${fmt(margin, 2)} x lev ${leverage}; ` +
+    `gross ${fmt(grossPnl, 2)} - open fee ${fmt(openFee, 2)} = net ${fmt(netPnl, 2)} USD`;
+}
+
+function closeReasonTag(trade) {
+  const reason = String(trade?.closeReason || "").trim().toUpperCase();
+  if (reason === "CLOSED_SL") return "SL";
+  if (reason === "CLOSED_TP") return "TP";
+  if (reason === "CLOSED_EARLY") return "EARLY";
+  return "";
+}
+
+function closeTriggerPriceUsdc(trade) {
+  const tag = closeReasonTag(trade);
+  if (tag === "SL") return tradeSlPriceUsdc(trade);
+  if (tag === "TP") return tradeTpPriceUsdc(trade);
+  return NaN;
+}
+
+function closeOvershootText(trade) {
+  const tag = closeReasonTag(trade);
+  const trigger = closeTriggerPriceUsdc(trade);
+  const exit = tradeExitPriceUsdc(trade);
+  if (!tag || !Number.isFinite(trigger) || trigger <= 0 || !Number.isFinite(exit) || exit <= 0) return "";
+
+  const side = getTradeDirection(trade);
+  let overshoot = 0;
+  if (tag === "SL") {
+    overshoot = side === "SHORT" ? exit - trigger : trigger - exit;
+  } else if (tag === "TP") {
+    overshoot = side === "SHORT" ? trigger - exit : exit - trigger;
+  }
+  if (!Number.isFinite(overshoot) || overshoot <= 0) return "";
+
+  const pct = (overshoot / trigger) * 100;
+  return ` overshoot +${fmt(overshoot, 4)} (${fmt(pct, 4)}%)`;
+}
+
+function closeAtDisplay(trade) {
+  const tag = closeReasonTag(trade);
+  const trigger = closeTriggerPriceUsdc(trade);
+  const exit = tradeExitPriceUsdc(trade);
+  if (!Number.isFinite(exit) || exit <= 0) return "-";
+  if (!tag || !Number.isFinite(trigger) || trigger <= 0) return fmt(exit, 3);
+  return `${fmt(trigger, 2)} (${fmt(exit, 3)})`;
 }
 
 function settlementEthText(trade) {
@@ -615,6 +812,10 @@ function mergeSyncedAndOptimisticOpenTrades(syncedTrades, optimisticTrades, clos
   return [...preservedOptimistic, ...synced];
 }
 
+function referralLikeVolumeToNumber(value) {
+  return usdc6ToNumber(rawToBigInt(value));
+}
+
 export default function UserPage() {
   const readProvider = useMemo(() => new JsonRpcProvider(ACTIVE_NETWORK.rpcUrl), []);
   const oracleRead = useMemo(() => new Contract(ACTIVE_NETWORK.oracle, ORACLE_ABI, readProvider), [readProvider]);
@@ -645,13 +846,15 @@ export default function UserPage() {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [usdcBalance, setUsdcBalance] = useState(0);
-  const [usdcDecimals, setUsdcDecimals] = useState(6);
+  const [usdcDecimals, setUsdcDecimals] = useState(QUOTE_TOKEN_DECIMALS);
   const [ethBalance, setEthBalance] = useState(0);
   const [pendingTrade, setPendingTrade] = useState(null);
   const [expandedTradeId, setExpandedTradeId] = useState(null);
   const [approvalPrompt, setApprovalPrompt] = useState(null);
   const [approvalBusy, setApprovalBusy] = useState(false);
   const [approvalCustom, setApprovalCustom] = useState("");
+  const [referralOpen, setReferralOpen] = useState(false);
+  const [targetProfitUsdc, setTargetProfitUsdc] = useState(10);
   const [protocol, setProtocol] = useState({
     marginUsdc6: 0n,
     feeBps: 0,
@@ -673,15 +876,16 @@ export default function UserPage() {
     if (fromUrl) return fromUrl;
     return normalizeReferralCode(sessionStorage.getItem(REFERRAL_PENDING_KEY) || "");
   });
+  const [manualReferralCode, setManualReferralCode] = useState("");
+  const [manualReferralBusy, setManualReferralBusy] = useState(false);
   const referralFetchStateRef = useRef({
     unavailable: false,
     inFlight: false,
     lastAttemptAt: 0,
+    wallet: "",
   });
-  const backendPollStateRef = useRef({
-    lastPriceAt: 0,
-    lastTradesAt: 0,
-  });
+  const wsRef = useRef(null);
+  const wsReconnectTimerRef = useRef(null);
   const previousWalletAddressRef = useRef("");
   const approvalCardRef = useRef(null);
 
@@ -758,20 +962,45 @@ export default function UserPage() {
     []
   );
 
-  const pollLatestPrice = useCallback(async () => {
-    const latest = await apiGet("/api/price/latest");
-    const value = normalizeDisplayPrice(latest.price);
+  const applyTradeSnapshot = useCallback((nextOpenTrades, nextClosedTrades) => {
+    const syncedIds = new Set((nextOpenTrades || []).map((item) => String(item?.onChainTradeId || "")));
+    const closedIds = new Set((nextClosedTrades || []).map((item) => String(item?.onChainTradeId || "")));
+    setClosedTrades(nextClosedTrades || []);
+    setOptimisticOpenTrades((prev) => {
+      const filtered = prev.filter((trade) => {
+        const id = String(trade?.onChainTradeId || "");
+        return id && !syncedIds.has(id) && !closedIds.has(id);
+      });
+      setOpenTrades(mergeSyncedAndOptimisticOpenTrades(nextOpenTrades || [], filtered, nextClosedTrades || []));
+      return filtered;
+    });
+  }, []);
+
+  const applyLatestPrice = useCallback((latest) => {
+    const value = normalizeDisplayPrice(latest?.price);
     if (!Number.isFinite(value) || value <= 0) return;
     const point = {
-      time: Math.floor(new Date(latest.timestamp).getTime() / 1000),
+      time: Math.floor(new Date(latest?.timestamp || Date.now()).getTime() / 1000),
       value,
     };
-
     setCurrentPrice(value);
-    setChartData((prev) => {
-      return upsertLiveCloseTick(prev, point, range);
-    });
+    setChartData((prev) => upsertLiveCloseTick(prev, point, range));
   }, [range]);
+
+  const loadBootstrap = useCallback(async (wallet) => {
+    if (!wallet) return;
+    const boot = await apiGet(`/api/bootstrap?wallet=${wallet.toLowerCase()}`);
+    applyLatestPrice(boot?.latestPrice || null);
+    applyTradeSnapshot(boot?.openTrades || [], boot?.closedTrades || []);
+    setReferrals((prev) => ({
+      ...(prev || {}),
+      totals: boot?.referralSummary || prev?.totals || {
+        tier1Volume: "0",
+        tier2Volume: "0",
+        combinedVolume: "0",
+      },
+    }));
+  }, [applyLatestPrice, applyTradeSnapshot]);
 
   const loadTrades = useCallback(async (wallet) => {
     if (!wallet) return;
@@ -782,38 +1011,88 @@ export default function UserPage() {
       return;
     }
     const data = await apiGet(`/api/trades?wallet=${wallet}`);
-    const nextClosedTrades = data.closedTrades || [];
-    const nextOpenTrades = data.openTrades || [];
-    const syncedIds = new Set(nextOpenTrades.map((item) => String(item?.onChainTradeId || "")));
-    const closedIds = new Set(nextClosedTrades.map((item) => String(item?.onChainTradeId || "")));
-    setClosedTrades(nextClosedTrades);
-    setOptimisticOpenTrades((prev) => {
-      const filtered = prev.filter((trade) => {
-        const id = String(trade?.onChainTradeId || "");
-        return id && !syncedIds.has(id) && !closedIds.has(id);
-      });
-      setOpenTrades(mergeSyncedAndOptimisticOpenTrades(nextOpenTrades, filtered, nextClosedTrades));
-      return filtered;
-    });
-  }, [activeProtocolVariant, backendProtocolVariant]);
+    applyTradeSnapshot(data.openTrades || [], data.closedTrades || []);
+  }, [activeProtocolVariant, backendProtocolVariant, applyTradeSnapshot]);
 
   const loadReferrals = useCallback(async (wallet) => {
     if (!wallet) return;
+    if (referralFetchStateRef.current.wallet !== wallet) {
+      referralFetchStateRef.current.wallet = wallet;
+      referralFetchStateRef.current.lastAttemptAt = 0;
+      referralFetchStateRef.current.unavailable = false;
+      referralFetchStateRef.current.inFlight = false;
+    }
     const now = Date.now();
-    if (referralsUnavailable || referralFetchStateRef.current.unavailable || referralFetchStateRef.current.inFlight) return;
+    if (referralFetchStateRef.current.inFlight) return;
     if (now - referralFetchStateRef.current.lastAttemptAt < REFERRAL_REFRESH_INTERVAL_MS) return;
 
     referralFetchStateRef.current.inFlight = true;
     referralFetchStateRef.current.lastAttemptAt = now;
     try {
       const data = await apiGet(`/api/users/${wallet}/referrals`);
-      setReferrals(data);
+
+      let normalized = data;
+      const looksLegacyShape =
+        data &&
+        data.user &&
+        data.user.walletAddress &&
+        data.user.id === undefined &&
+        !("referrer" in data);
+
+      if (looksLegacyShape) {
+        const username = ACTIVE_NETWORK.adminDefaultUser || "";
+        const password = ACTIVE_NETWORK.adminDefaultPassword || "";
+        if (username && password) {
+          try {
+            const adminSelf = await apiGet(`/api/admin/users/${wallet}`, {
+              auth: { username, password },
+            });
+            const tier1 = Array.isArray(adminSelf?.referredUsers) ? adminSelf.referredUsers : [];
+            const tier2 = [];
+            for (const parent of tier1) {
+              const childWallet = String(parent?.walletAddress || "").toLowerCase();
+              if (!childWallet) continue;
+              try {
+                const childDetail = await apiGet(`/api/admin/users/${childWallet}`, {
+                  auth: { username, password },
+                });
+                for (const grandChild of childDetail?.referredUsers || []) {
+                  tier2.push({
+                    ...grandChild,
+                    parentWalletAddress: parent.walletAddress,
+                    parentReferralCode: parent.referralCode,
+                  });
+                }
+              } catch {
+              }
+            }
+
+            const tier1Volume = tier1.reduce((sum, item) => sum + rawToBigInt(item?.totalTradingVolume), 0n);
+            const tier2Volume = tier2.reduce((sum, item) => sum + rawToBigInt(item?.totalTradingVolume), 0n);
+
+            normalized = {
+              user: adminSelf?.user || data?.user || null,
+              referrer: adminSelf?.referrer || null,
+              tier1,
+              tier2,
+              totals: {
+                tier1Volume: tier1Volume.toString(),
+                tier2Volume: tier2Volume.toString(),
+                combinedVolume: (tier1Volume + tier2Volume).toString(),
+              },
+            };
+          } catch {
+          }
+        }
+      }
+
+      setReferrals(normalized);
       setReferralsUnavailable(false);
       referralFetchStateRef.current.unavailable = false;
     } catch (referralError) {
       if (referralError?.status === 404) {
-        setReferralsUnavailable(true);
-        referralFetchStateRef.current.unavailable = true;
+        setReferralsUnavailable(false);
+        referralFetchStateRef.current.unavailable = false;
         setReferrals({
           user: null,
           tier1: [],
@@ -830,7 +1109,96 @@ export default function UserPage() {
     } finally {
       referralFetchStateRef.current.inFlight = false;
     }
-  }, [referralsUnavailable]);
+  }, []);
+
+  const connectRealtime = useCallback((wallet) => {
+    if (!wallet) return () => {};
+    const base = String(ACTIVE_NETWORK.backendUrl || "");
+    const wsBase = base.replace(/^http/i, "ws").replace(/\/+$/, "");
+    if (!wsBase) return () => {};
+    const url = `${wsBase}/ws?wallet=${encodeURIComponent(wallet.toLowerCase())}`;
+
+    if (wsReconnectTimerRef.current) {
+      clearTimeout(wsReconnectTimerRef.current);
+      wsReconnectTimerRef.current = null;
+    }
+    if (wsRef.current) {
+      try { wsRef.current.close(); } catch {}
+      wsRef.current = null;
+    }
+
+    const ws = new WebSocket(url);
+    wsRef.current = ws;
+
+    ws.onopen = () => {};
+    ws.onerror = () => {};
+
+    ws.onmessage = (evt) => {
+      let parsed;
+      try {
+        parsed = JSON.parse(evt.data);
+      } catch {
+        return;
+      }
+      const eventName = parsed?.event;
+      const payload = parsed?.payload || {};
+      if (eventName === "price_tick") {
+        applyLatestPrice(payload);
+        return;
+      }
+      if (eventName === "trade_upsert" || eventName === "trade_closed") {
+        const trade = payload?.trade;
+        if (!trade) return;
+        const isOpen = String(trade?.status || "").toUpperCase() === "OPEN";
+        setOptimisticOpenTrades((prev) =>
+          prev.filter((item) => String(item?.onChainTradeId || "") !== String(trade?.onChainTradeId || ""))
+        );
+        if (isOpen) {
+          setOpenTrades((prev) => mergeOptimisticOpenTrade(prev, trade));
+          setClosedTrades((prev) =>
+            prev.filter((item) => String(item?.onChainTradeId || "") !== String(trade?.onChainTradeId || ""))
+          );
+        } else {
+          setOpenTrades((prev) =>
+            prev.filter((item) => String(item?.onChainTradeId || "") !== String(trade?.onChainTradeId || ""))
+          );
+          setClosedTrades((prev) => [trade, ...prev.filter((item) => String(item?.onChainTradeId || "") !== String(trade?.onChainTradeId || ""))]);
+        }
+        return;
+      }
+      if (eventName === "referral_summary") {
+        setReferrals((prev) => ({
+          ...(prev || {}),
+          totals: payload || prev?.totals || {
+            tier1Volume: "0",
+            tier2Volume: "0",
+            combinedVolume: "0",
+          },
+        }));
+      }
+    };
+
+    ws.onclose = () => {
+      if (wsRef.current !== ws) return;
+      wsReconnectTimerRef.current = setTimeout(() => {
+        loadBootstrap(wallet).catch(() => {});
+        connectRealtime(wallet);
+      }, 1500);
+    };
+
+    return () => {
+      if (wsReconnectTimerRef.current) {
+        clearTimeout(wsReconnectTimerRef.current);
+        wsReconnectTimerRef.current = null;
+      }
+      if (wsRef.current === ws) {
+        wsRef.current = null;
+      }
+      try {
+        ws.close();
+      } catch {}
+    };
+  }, [applyLatestPrice, loadBootstrap]);
 
   const requestBackendTradeSync = useCallback(async (tradeId = null) => {
     if (activeProtocolVariant !== backendProtocolVariant) return true;
@@ -880,7 +1248,7 @@ export default function UserPage() {
         const backendSyncOk = await requestBackendTradeSync(tradeId);
         let backendRefreshOk = backendSyncOk;
         try {
-          await Promise.all([loadTrades(wallet), loadReferrals(wallet)]);
+          await Promise.all([loadBootstrap(wallet), loadReferrals(wallet)]);
       } catch (refreshError) {
         backendRefreshOk = false;
         console.warn("[backend] post-trade refresh failed", refreshError);
@@ -888,7 +1256,7 @@ export default function UserPage() {
       await Promise.all([loadUsdcBalance(wallet), loadEthBalance(wallet)]);
       return backendRefreshOk;
     },
-      [requestBackendTradeSync, loadTrades, loadReferrals, loadUsdcBalance, loadEthBalance]
+      [requestBackendTradeSync, loadBootstrap, loadReferrals, loadUsdcBalance, loadEthBalance]
     );
 
   const handleReferralResult = useCallback((data) => {
@@ -947,6 +1315,44 @@ export default function UserPage() {
     [handleReferralResult, loadReferrals, pendingReferralCode]
   );
 
+  const applyManualReferral = useCallback(async () => {
+    if (!walletAddress || !user || user.referredBy) return;
+    const code = normalizeReferralCode(manualReferralCode);
+    if (!code) {
+      setStatus("Enter a referral code first.");
+      return;
+    }
+
+    if (code === normalizeReferralCode(user.referralCode || "")) {
+      setStatus("Referral code cannot be your own wallet.");
+      return;
+    }
+
+    setManualReferralBusy(true);
+    setError("");
+    setStatus("");
+    try {
+      const result = await apiPost("/api/users/login", {
+        walletAddress,
+        referralCode: code,
+      });
+      handleReferralResult(result);
+      setPendingReferralCode(code);
+      sessionStorage.setItem(REFERRAL_PENDING_KEY, code);
+      setReferralsUnavailable(false);
+      referralFetchStateRef.current.unavailable = false;
+      referralFetchStateRef.current.inFlight = false;
+      await loadReferrals(walletAddress);
+      if (result?.referral?.status === "applied" || result?.referral?.status === "already_set") {
+        setManualReferralCode("");
+      }
+    } catch (manualError) {
+      setError(getErrorMessage(manualError));
+    } finally {
+      setManualReferralBusy(false);
+    }
+  }, [walletAddress, user, manualReferralCode, handleReferralResult, loadReferrals]);
+
   const connectWallet = useCallback(
     async (requestAccounts = true) => {
       if (!window.ethereum) {
@@ -970,12 +1376,13 @@ export default function UserPage() {
 
       await loginUser(wallet.toLowerCase());
       await Promise.all([
-        loadTrades(wallet.toLowerCase()),
+        loadBootstrap(wallet.toLowerCase()),
+        loadReferrals(wallet.toLowerCase()).catch(() => {}),
         loadUsdcBalance(wallet.toLowerCase()),
         loadEthBalance(wallet.toLowerCase()),
       ]);
     },
-    [loadTrades, loadUsdcBalance, loadEthBalance, loginUser]
+    [loadBootstrap, loadReferrals, loadUsdcBalance, loadEthBalance, loginUser]
   );
 
   const syncWalletFromMetaMask = useCallback(async () => {
@@ -1000,14 +1407,15 @@ export default function UserPage() {
       setChainId(Number(network.chainId));
       await loginUser(nextWallet);
       await Promise.all([
-        loadTrades(nextWallet).catch(() => {}),
+        loadBootstrap(nextWallet).catch(() => {}),
+        loadReferrals(nextWallet).catch(() => {}),
         loadUsdcBalance(nextWallet).catch(() => {}),
         loadEthBalance(nextWallet).catch(() => {}),
       ]);
       setStatus("Wallet switched to the account currently selected in MetaMask.");
     } catch {
     }
-  }, [walletProvider, walletAddress, loginUser, loadTrades, loadUsdcBalance, loadEthBalance]);
+  }, [walletProvider, walletAddress, loginUser, loadBootstrap, loadReferrals, loadUsdcBalance, loadEthBalance]);
 
   const switchToConfiguredChain = useCallback(async () => {
     if (!walletProvider || !window.ethereum) {
@@ -1145,9 +1553,10 @@ export default function UserPage() {
           protocol.feeScaleFactorPpm,
           activeProtocolVariant
         );
-        const profitTargetArg = targetProfitPpmForGrossPlusTen(
+        const profitTargetArg = targetProfitPpmForDesiredPnl(
           protocol.marginUsdc6,
-          totalFeePpm
+          totalFeePpm,
+          targetProfitUsdc
         );
         if (side === "SHORT") {
           return makeit.openShortTrade(
@@ -1181,7 +1590,7 @@ export default function UserPage() {
         leverage,
         expectedPriceE18: expectedPriceE18.toString(),
         toleranceBps: OPEN_TRADE_TOLERANCE_BPS,
-        profitTarget: targetProfitPpmForGrossPlusTen(protocol.marginUsdc6, totalFeePpm).toString(),
+        profitTarget: targetProfitPpmForDesiredPnl(protocol.marginUsdc6, totalFeePpm, targetProfitUsdc).toString(),
       });
       try {
         let tx;
@@ -1220,7 +1629,7 @@ export default function UserPage() {
         throw error;
       }
     },
-    [activeMakeitAddress, activeMakeitAbi, activeProtocolVariant, baseTotalFeePpm, currentPrice, oracleRead, protocol.feeScaleFactorPpm, protocol.marginUsdc6]
+    [activeMakeitAddress, activeMakeitAbi, activeProtocolVariant, baseTotalFeePpm, currentPrice, oracleRead, protocol.feeScaleFactorPpm, protocol.marginUsdc6, targetProfitUsdc]
   );
 
   const openTrade = useCallback(
@@ -1245,7 +1654,7 @@ export default function UserPage() {
         const marginUsdc6 = protocol.marginUsdc6 > 0n ? protocol.marginUsdc6 : (activeProtocolVariant === 'v4' ? 10_000_000n : BigInt(await makeitRead.marginUSDC()));
         if (displayedSpendState.balance < marginUsdc6) {
           setError(
-            `Insufficient USDC balance. Need ${formatUnits(marginUsdc6, usdcDecimals)} USDC, wallet has ${formatUnits(displayedSpendState.balance, usdcDecimals)} USDC.`
+            `Insufficient USD balance. Need ${formatUnits(marginUsdc6, usdcDecimals)} USD, wallet has ${formatUnits(displayedSpendState.balance, usdcDecimals)} USD.`
           );
           return;
         }
@@ -1288,13 +1697,13 @@ export default function UserPage() {
         );
       } catch (tradeError) {
         const decoded = decodeTxErrorMessage(tradeError);
-        if (signer && decoded.includes("USDC transfer failed")) {
+        if (signer && decoded.includes("USD transfer failed")) {
           const signerAddress = (await signer.getAddress()).toLowerCase();
           const marginUsdc6 = protocol.marginUsdc6 > 0n ? protocol.marginUsdc6 : 10_000_000n;
           const spendState = await getUsdcSpendState(signer, signerAddress);
           if (spendState.balance < marginUsdc6) {
             setError(
-              `Insufficient USDC balance. Need ${formatUnits(marginUsdc6, usdcDecimals)} USDC, wallet has ${formatUnits(spendState.balance, usdcDecimals)} USDC.`
+              `Insufficient USD balance. Need ${formatUnits(marginUsdc6, usdcDecimals)} USD, wallet has ${formatUnits(spendState.balance, usdcDecimals)} USD.`
             );
             return;
           }
@@ -1430,11 +1839,11 @@ export default function UserPage() {
         });
         const tx = await usdc.approve(activeMakeitAddress, amount);
         logTxSubmitted("approveUSDC", tx.hash);
-        setStatus(`Approving USDC... ${tx.hash}`);
+        setStatus(`Approving USD... ${tx.hash}`);
         const receipt = await tx.wait();
         logTxCompleted("approveUSDC", receipt);
         if (!receipt || Number(receipt.status) !== 1) {
-          throw new Error("USDC approval transaction reverted.");
+          throw new Error("USD approval transaction reverted.");
         }
 
           if (mode === "required") {
@@ -1493,15 +1902,27 @@ export default function UserPage() {
     setClosedTrades([]);
     setOptimisticOpenTrades([]);
     if (walletAddress) {
-      loadTrades(walletAddress).catch(reportBackgroundError);
+      loadBootstrap(walletAddress).catch(reportBackgroundError);
     }
-  }, [activeProtocolVariant, walletAddress, loadTrades, reportBackgroundError]);
+  }, [activeProtocolVariant, walletAddress, loadBootstrap, reportBackgroundError]);
 
     useEffect(() => {
       if (!walletAddress) {
         setApprovalPrompt(null);
         setPendingTrade(null);
         setExpandedTradeId(null);
+        setUser(null);
+        setReferrals(null);
+        setReferralsUnavailable(false);
+        setOpenTrades([]);
+        setClosedTrades([]);
+        setOptimisticOpenTrades([]);
+        setUsdcBalance(0);
+        setEthBalance(0);
+        referralFetchStateRef.current.wallet = "";
+        referralFetchStateRef.current.lastAttemptAt = 0;
+        referralFetchStateRef.current.unavailable = false;
+        referralFetchStateRef.current.inFlight = false;
         previousWalletAddressRef.current = "";
         return;
       }
@@ -1509,6 +1930,18 @@ export default function UserPage() {
         setApprovalPrompt(null);
         setPendingTrade(null);
         setExpandedTradeId(null);
+        setUser(null);
+        setReferrals(null);
+        setReferralsUnavailable(false);
+        setOpenTrades([]);
+        setClosedTrades([]);
+        setOptimisticOpenTrades([]);
+        setUsdcBalance(0);
+        setEthBalance(0);
+        referralFetchStateRef.current.wallet = walletAddress;
+        referralFetchStateRef.current.lastAttemptAt = 0;
+        referralFetchStateRef.current.unavailable = false;
+        referralFetchStateRef.current.inFlight = false;
       }
       previousWalletAddressRef.current = walletAddress;
     }, [walletAddress]);
@@ -1521,31 +1954,19 @@ export default function UserPage() {
 
   useEffect(() => {
     const timer = setInterval(() => {
-      const now = Date.now();
-      if (now - backendPollStateRef.current.lastPriceAt >= BACKEND_PRICE_POLL_MS) {
-        backendPollStateRef.current.lastPriceAt = now;
-        pollLatestPrice().catch(() => {});
-      }
       loadProtocol().catch(() => {});
       if (walletAddress) {
-        if (now - backendPollStateRef.current.lastTradesAt >= BACKEND_TRADES_POLL_MS) {
-          backendPollStateRef.current.lastTradesAt = now;
-          loadTrades(walletAddress).catch(() => {});
-        }
         loadUsdcBalance(walletAddress).catch(() => {});
         loadEthBalance(walletAddress).catch(() => {});
       }
     }, ONCHAIN_PROTOCOL_POLL_MS);
     return () => clearInterval(timer);
-  }, [pollLatestPrice, loadProtocol, walletAddress, loadTrades, loadUsdcBalance, loadEthBalance]);
+  }, [loadProtocol, walletAddress, loadUsdcBalance, loadEthBalance]);
 
   useEffect(() => {
-    if (!walletAddress || !user || user.walletAddress !== walletAddress || referralsUnavailable) return;
-    const timer = setInterval(() => {
-      loadReferrals(walletAddress).catch(() => {});
-    }, REFERRAL_REFRESH_INTERVAL_MS);
-    return () => clearInterval(timer);
-  }, [walletAddress, user, loadReferrals, referralsUnavailable]);
+    if (!walletAddress) return undefined;
+    return connectRealtime(walletAddress);
+  }, [walletAddress, connectRealtime]);
 
   useEffect(() => {
     if (!window.ethereum) return undefined;
@@ -1592,23 +2013,15 @@ export default function UserPage() {
     }
     return "No referral code pending. Share your code to invite others.";
   }, [walletAddress, user?.referredBy, pendingReferralCode]);
+  const canManuallyAddReferrer = Boolean(walletAddress && user && !user.referredBy);
 
   const presetViews = useMemo(
     () =>
-      TRADE_PRESETS.map((preset) => {
-        const totalFeePpm = totalFeePpmForTrade(
-          baseTotalFeePpm,
-          preset.leverage,
-          protocol.feeScaleFactorPpm,
-          activeProtocolVariant
-        );
-        const tpPpm = targetProfitPpmForGrossPlusTen(protocol.marginUsdc6, totalFeePpm);
-        const feeUsdc = Number(formatUnits((protocol.marginUsdc6 * totalFeePpm) / PROFIT_PPM_SCALE, 6));
-        const movePct = movePctForDisplay(tpPpm, preset.leverage);
-        const lossPct = movePctForDisplay(PROFIT_PPM_SCALE, preset.leverage);
-        return { ...preset, movePct, lossPct, feeUsdc };
-      }),
-    [activeProtocolVariant, baseTotalFeePpm, protocol.feeScaleFactorPpm, protocol.marginUsdc6]
+      TRADE_PRESETS.map((preset) => ({
+        ...preset,
+        notionalUsdc: Number(formatUnits(protocol.marginUsdc6 || 0n, usdcDecimals)) * Number(preset.leverage || 0),
+      })),
+    [protocol.marginUsdc6]
   );
   const previewTradeSelection = useCallback(
     (side, leverage) => {
@@ -1618,7 +2031,14 @@ export default function UserPage() {
         protocol.feeScaleFactorPpm,
         activeProtocolVariant
       );
-      const preview = buildTradePreview(side, leverage, currentPrice, protocol.marginUsdc6, totalFeePpm);
+      const preview = buildTradePreview(
+        side,
+        leverage,
+        currentPrice,
+        protocol.marginUsdc6,
+        totalFeePpm,
+        targetProfitUsdc
+      );
       if (!preview) {
         setError("Price preview is not ready yet. Wait for the live price to load and try again.");
         return;
@@ -1628,27 +2048,106 @@ export default function UserPage() {
       setApprovalPrompt(null);
       setPendingTrade(preview);
     },
-    [activeProtocolVariant, baseTotalFeePpm, currentPrice, protocol.feeScaleFactorPpm, protocol.marginUsdc6]
+    [activeProtocolVariant, baseTotalFeePpm, currentPrice, protocol.feeScaleFactorPpm, protocol.marginUsdc6, targetProfitUsdc]
   );
   const chartPriceLines = useMemo(() => {
-    const openTradeLines = openTrades.flatMap((trade) => buildTradeChartLines(trade));
-    if (!pendingTrade) return openTradeLines;
+    const livePendingTrade = resolvePreviewAtPrice(pendingTrade, currentPrice);
+    const showOpenTradeLabels = !livePendingTrade;
+    let closestTpTradeId = null;
+    let closestSlTradeId = null;
+    if (showOpenTradeLabels && Number.isFinite(currentPrice) && currentPrice > 0) {
+      let minTpDistance = Infinity;
+      let minSlDistance = Infinity;
+      for (const trade of openTrades) {
+        const tradeId = String(trade?.onChainTradeId || "").trim();
+        const tp = tradeTpPriceUsdc(trade);
+        const sl = tradeSlPriceUsdc(trade);
+        if (tradeId && Number.isFinite(tp) && tp > 0) {
+          const d = Math.abs(tp - currentPrice);
+          if (d < minTpDistance) {
+            minTpDistance = d;
+            closestTpTradeId = tradeId;
+          }
+        }
+        if (tradeId && Number.isFinite(sl) && sl > 0) {
+          const d = Math.abs(sl - currentPrice);
+          if (d < minSlDistance) {
+            minSlDistance = d;
+            closestSlTradeId = tradeId;
+          }
+        }
+      }
+    }
+    const openTradeLines = openTrades.flatMap((trade) => {
+      const tradeId = String(trade?.onChainTradeId || "").trim();
+      return buildTradeChartLines(trade, {
+        compactLabel: true,
+        showTpLabel: showOpenTradeLabels && tradeId !== "" && tradeId === closestTpTradeId,
+        showSlLabel: showOpenTradeLabels && tradeId !== "" && tradeId === closestSlTradeId,
+      });
+    });
+    if (!livePendingTrade) return openTradeLines;
+    const marginUsd = Number(livePendingTrade?.grossMarginUsdc || 0);
+    const profitUsd = Number(livePendingTrade?.targetProfitUsdc || 0);
+    const profitTag = Number.isFinite(profitUsd) && profitUsd > 0 ? fmt(profitUsd, 0) : "0";
+    const lossTag = Number.isFinite(marginUsd) && marginUsd > 0 ? fmt(marginUsd, 0) : "0";
     return [
       ...openTradeLines,
       ...buildTradeChartLines(
         {
-          entryPrice: parseUnits(String(pendingTrade.entryPrice), 18),
-          tpPrice: parseUnits(String(pendingTrade.tpPrice), 18),
-          slPrice: parseUnits(String(pendingTrade.slPrice), 18),
+          entryPrice: parseUnits(String(livePendingTrade.entryPrice), 18),
+          tpPrice: parseUnits(String(livePendingTrade.tpPrice), 18),
+          slPrice: parseUnits(String(livePendingTrade.slPrice), 18),
         },
-        { strong: true, includeEntry: true }
+        {
+          strong: true,
+          includeEntry: false,
+          tpTitle: "",
+          slTitle: "",
+          tpCustomLabel: `+USD ${profitTag}`,
+          slCustomLabel: `-USD ${lossTag}`,
+          tpCustomLabelPosition: "above",
+          slCustomLabelPosition: "below",
+        }
       ),
     ];
-  }, [openTrades, pendingTrade]);
+  }, [currentPrice, openTrades, pendingTrade]);
+  const displayPendingTrade = useMemo(
+    () => resolvePreviewAtPrice(pendingTrade, currentPrice),
+    [currentPrice, pendingTrade]
+  );
+  useEffect(() => {
+    if (!pendingTrade) return;
+    const side = pendingTrade.side || "LONG";
+    const leverage = Number(pendingTrade.leverage || 100);
+    const totalFeePpm = totalFeePpmForTrade(
+      baseTotalFeePpm,
+      leverage,
+      protocol.feeScaleFactorPpm,
+      activeProtocolVariant
+    );
+    const next = buildTradePreview(
+      side,
+      leverage,
+      currentPrice,
+      protocol.marginUsdc6,
+      totalFeePpm,
+      targetProfitUsdc
+    );
+    if (next) setPendingTrade(next);
+  }, [targetProfitUsdc]);
   const anyShortPresetAvailable = useMemo(() => {
     if (!protocolSupportsShorts || protocol.marginUsdc6 <= 0n) return false;
     return TRADE_PRESETS.some((preset) => protocol.marginUsdc6 * BigInt(preset.leverage) <= shortCapacityUsdc6);
   }, [protocolSupportsShorts, protocol.marginUsdc6, shortCapacityUsdc6]);
+  const profitTargetCarousel = useMemo(() => {
+    const selectedIndex = Math.max(0, PROFIT_TARGET_OPTIONS.indexOf(targetProfitUsdc));
+    return PROFIT_TARGET_OPTIONS.map((amount, index) => {
+      const offset = index - selectedIndex;
+      const distance = Math.abs(offset);
+      return { amount, offset, distance };
+    });
+  }, [targetProfitUsdc]);
 
   return (
     <div className="app">
@@ -1669,7 +2168,7 @@ export default function UserPage() {
                 {walletAddress.slice(0, 6)}...{walletAddress.slice(-4)}
               </span>
               <span className="wallet-chip-balance">
-                {fmt(usdcBalance, Math.min(6, Math.max(2, usdcDecimals)))} USDC | {fmt(ethBalance, 4)} ETH
+                {fmt(usdcBalance, Math.min(6, Math.max(2, usdcDecimals)))} USD | {fmt(ethBalance, 4)} ETH
               </span>
             </button>
           ) : (
@@ -1682,8 +2181,8 @@ export default function UserPage() {
 
       <section className="card chart-card chart-card-wide">
         <div className="card-head">
-          <h2>Live ETH Price</h2>
-          <strong>{currentPrice ? `${fmt(currentPrice, 4)} USDC` : "Loading..."}</strong>
+          <h2 className="hero-copy">ETH</h2>
+          <strong className="hero-copy">{currentPrice ? `${fmt(currentPrice, 4)} USD` : "Loading..."}</strong>
         </div>
         <div className="range-switch">
           {RANGE_OPTIONS.map((option) => (
@@ -1700,54 +2199,114 @@ export default function UserPage() {
       </section>
 
       <section className="card trade-panel">
-        <div className="card-head">
-          <h2>Trade Setup</h2>
-          <span className="muted">Current open PnL: {totalOpenPnl >= 0 ? "+" : ""}{fmt(totalOpenPnl, 2)} USDC</span>
+        <div className="trade-headline-row">
+          <p className="quick-copy">put in USD 10</p>
+          <p className="quick-copy quick-copy-right">
+            open trades:{" "}
+            <span className={totalOpenPnl >= 0 ? "success" : "danger"}>
+              {totalOpenPnl >= 0 ? "+" : ""}
+              {fmt(totalOpenPnl, 2)} USD
+            </span>
+          </p>
         </div>
         {tradeActionsBlockedByBackendVariant ? (
           <p className="warning">
             Backend sync is active for {backendProtocolVariant.toUpperCase()}. Switch back to that protocol to trade and view synced trades.
           </p>
         ) : null}
-        <p className="quick-copy">
-          I place <strong>{fmt(Number(formatUnits(protocol.marginUsdc6 || 0n, 6)), 2)} USD</strong> that ETH{" "}
-          <span className="brand-inline">makeit</span>
-        </p>
-        <div className="trade-speed-row">
-          {presetViews.map((preset) => (
-            <span key={`${preset.leverage}-pace`}>{preset.pace}</span>
-          ))}
-        </div>
-        <div className="trade-direction-grid">
-          <div className="trade-direction-group">
-            <div className="trade-group-head">
-              <h3>Long</h3>
+        {displayPendingTrade ? (
+          <div className="trade-preview-card">
+            <div className="card-head">
+              <h3 className="preview-topline">
+                put in USD {fmt(displayPendingTrade.grossMarginUsdc, 0)}
+                <span className="preview-fee-note">(-fee*)</span> and trade with {displayPendingTrade.leverage}x more
+              </h3>
             </div>
-            <div className="trade-preset-grid">
-              {presetViews.map((preset) => (
-                <button
-                  key={`long-${preset.leverage}`}
-                  className="btn trade-option trade-option-long"
-                  disabled={!walletAddress || busy || tradeActionsBlockedByBackendVariant}
-                  onClick={() => previewTradeSelection("LONG", preset.leverage)}
-                >
-                  <span className="trade-title">
-                    +{preset.movePct} (receive <span className="trade-gain">$20.00</span>)
-                  </span>
-                  <small className="trade-hint">net +$10.00, fee ${fmt(preset.feeUsdc, 2)}, if -{preset.lossPct} lose $10.00</small>
-                </button>
-              ))}
+            <div className="profit-target-row">
+              <span className="profit-target-inline">
+                {profitTargetCarousel.map(({ amount, offset, distance }) => (
+                  <button
+                    key={`profit-${amount}`}
+                    className={`profit-target-btn ${targetProfitUsdc === amount ? "profit-target-selected" : "profit-target-unselected"}`}
+                    onClick={() => setTargetProfitUsdc(amount)}
+                    disabled={busy || approvalBusy}
+                    style={{
+                      transform: `translate(calc(-50% + ${offset * 190}px), -50%) scale(${
+                        distance === 0 ? 1.15 : distance === 1 ? 0.72 : 0.56
+                      })`,
+                      opacity: distance === 0 ? 1 : distance === 1 ? 0.62 : 0.32,
+                      zIndex: distance === 0 ? 3 : distance === 1 ? 2 : 1,
+                    }}
+                  >
+                    + USD {amount}
+                  </button>
+                ))}
+              </span>
+            </div>
+            <p className="preview-simple preview-simple-main preview-rise-line">
+              if price raises{" "}
+              <strong className="preview-profit-number">{fmt(displayPendingTrade.tpMovePct, displayPendingTrade.tpMovePct >= 1 ? 2 : 3)}%</strong> to{" "}
+              <strong className="preview-profit-number">{fmt(displayPendingTrade.tpPrice, 4)}</strong>
+            </p>
+            <p className="preview-simple preview-simple-small preview-loss-line">
+              <strong className="preview-loss-number">- USD {fmt(displayPendingTrade.grossMarginUsdc, 2)}</strong> if price falls{" "}
+              <strong className="preview-loss-number">{fmt(displayPendingTrade.slMovePct, displayPendingTrade.slMovePct >= 1 ? 2 : 3)}%</strong> to{" "}
+              <strong className="preview-loss-number">{fmt(displayPendingTrade.slPrice, 4)}</strong>
+            </p>
+            <div className="trade-preview-actions trade-preview-actions-centered">
+              <button
+                className="btn solid makeit-cta"
+                disabled={busy || approvalBusy || !walletAddress}
+                onClick={() => openTrade(displayPendingTrade.side, displayPendingTrade.leverage)}
+              >
+                {busy ? "Submitting..." : "MAKEIT"}
+              </button>
+              <button className="btn ghost cancel-corner-btn" disabled={busy || approvalBusy} onClick={() => setPendingTrade(null)}>
+                Cancel Preview
+              </button>
             </div>
           </div>
+        ) : (
+          <p className="muted hero-copy trade-preview-placeholder">click trade for preview</p>
+        )}
+        <div className="trade-direction-grid">
+          <div className="trade-direction-group">
+            <div className="trade-speed-row">
+              {presetViews.map((preset) => (
+                <span key={`${preset.id}-pace`}>{preset.pace}</span>
+              ))}
+            </div>
+              <div className="trade-preset-grid">
+                {presetViews.map((preset) => (
+                  <button
+                    key={`long-${preset.id}`}
+                    className="btn trade-option trade-option-long"
+                    disabled={!walletAddress || busy || tradeActionsBlockedByBackendVariant}
+                    onClick={() => previewTradeSelection("LONG", preset.leverage)}
+                    aria-label={`Open long ${preset.leverage}x`}
+                  >
+                    <span className="trade-card-graph" aria-hidden="true">
+                      <svg viewBox="0 0 120 70" role="presentation">
+                        <path d="M8 58 C22 44, 34 33, 44 26 C50 34, 57 40, 64 45 C74 34, 88 25, 108 10" />
+                        <path d="M94 9 L108 10 L106 24" />
+                      </svg>
+                    </span>
+                    <span className="trade-card-bottom">trade with USD {fmt(preset.notionalUsdc, 0)}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
           {protocolSupportsShorts ? (
             <div className="trade-direction-group">
-              <div className="trade-group-head">
-                <h3>Short</h3>
+              <div className="trade-speed-row">
+                {presetViews.map((preset) => (
+                  <span key={`${preset.id}-pace-short`}>{preset.pace}</span>
+                ))}
               </div>
               <div className="trade-preset-grid">
                 {presetViews.map((preset) => (
                   <button
-                    key={`short-${preset.leverage}`}
+                    key={`short-${preset.id}`}
                     className="btn trade-option trade-option-short"
                     disabled={
                       !walletAddress ||
@@ -1756,60 +2315,29 @@ export default function UserPage() {
                       protocol.marginUsdc6 * BigInt(preset.leverage) > shortCapacityUsdc6
                     }
                     onClick={() => previewTradeSelection("SHORT", preset.leverage)}
+                    aria-label={`Open short ${preset.leverage}x`}
                   >
-                    <span className="trade-title">
-                      -{preset.movePct} (receive <span className="trade-gain">$20.00</span>)
+                    <span className="trade-card-graph short" aria-hidden="true">
+                      <svg viewBox="0 0 120 70" role="presentation">
+                        <path d="M8 12 C22 26, 34 37, 44 44 C50 36, 57 30, 64 25 C74 36, 88 45, 108 60" />
+                        <path d="M94 61 L108 60 L106 46" />
+                      </svg>
                     </span>
-                    <small className="trade-hint">net +$10.00, fee ${fmt(preset.feeUsdc, 2)}, if +{preset.lossPct} lose $10.00</small>
+                    <span className="trade-card-bottom">trade with USD {fmt(preset.notionalUsdc, 0)}</span>
                   </button>
                 ))}
               </div>
-              {!anyShortPresetAvailable ? <p className="muted">Short trades are not currently available.</p> : null}
             </div>
           ) : null}
         </div>
-        {pendingTrade ? (
-          <div className="trade-preview-card">
-            <div className="card-head">
-              <h3>{pendingTrade.side === "SHORT" ? "Short" : "Long"} Preview</h3>
-              <span className={`tag ${pendingTrade.side === "SHORT" ? "tag-short" : "tag-long"}`}>
-                {pendingTrade.leverage}x
-              </span>
-            </div>
-            <p className="muted">
-              If price {pendingTrade.side === "SHORT" ? "drops" : "rises"} {fmt(pendingTrade.tpMovePct, pendingTrade.tpMovePct >= 1 ? 2 : 3)}% to{" "}
-              {fmt(pendingTrade.tpPrice, 4)}, you realize about +{fmt(pendingTrade.takeProfitPnlUsdc, 2)} USDC and receive about{" "}
-              {fmt(pendingTrade.payoutUsdc, 2)} USDC back.
-            </p>
-            <p className="muted">
-              If price {pendingTrade.side === "SHORT" ? "rises" : "falls"} {fmt(pendingTrade.slMovePct, pendingTrade.slMovePct >= 1 ? 2 : 3)}% to{" "}
-              {fmt(pendingTrade.slPrice, 4)}, you lose about {fmt(pendingTrade.stopLossPnlUsdc, 2)} USDC. Entry:{" "}
-              {fmt(pendingTrade.entryPrice, 4)}. Fee on open: {fmt(pendingTrade.feeUsdc, 2)} USDC.
-            </p>
-            <div className="trade-preview-actions">
-              <button
-                className="btn solid"
-                disabled={busy || approvalBusy || !walletAddress}
-                onClick={() => openTrade(pendingTrade.side, pendingTrade.leverage)}
-              >
-                {busy ? "Submitting..." : `Confirm ${pendingTrade.side === "SHORT" ? "Short" : "Long"} Trade`}
-              </button>
-              <button className="btn ghost" disabled={busy || approvalBusy} onClick={() => setPendingTrade(null)}>
-                Cancel Preview
-              </button>
-            </div>
-          </div>
-        ) : (
-          <p className="muted">Choose a long or short button to preview TP/SL on the chart before confirming the trade.</p>
-        )}
         {approvalPrompt ? (
           <div ref={approvalCardRef} className="card trade-inline-card">
             <div className="card-head">
-              <h2 style={{ fontSize: "0.95rem" }}>USDC Approval Required</h2>
+              <h2 style={{ fontSize: "0.95rem" }}>USD Approval Required</h2>
             </div>
             <p className="muted">
-              Approve USDC for this {approvalPrompt.side === "SHORT" ? "short" : "long"} trade first. Required now:{" "}
-              {fmt(Number(formatUnits(BigInt(approvalPrompt.requiredUsdc6), usdcDecimals)), 4)} USDC
+              Approve USD for this {approvalPrompt.side === "SHORT" ? "short" : "long"} trade first. Required now:{" "}
+              {fmt(Number(formatUnits(BigInt(approvalPrompt.requiredUsdc6), usdcDecimals)), 4)} USD
             </p>
             <div className="approve-row">
               <button className="btn ghost" disabled={approvalBusy} onClick={() => approveAndContinueTrade("required")}>
@@ -1824,7 +2352,7 @@ export default function UserPage() {
               <input
                 value={approvalCustom}
                 onChange={(e) => setApprovalCustom(e.target.value)}
-                placeholder="Custom USDC amount"
+                placeholder="Custom USD amount"
               />
               <button className="btn ghost" disabled={approvalBusy} onClick={() => approveAndContinueTrade("custom")}>
                 {approvalBusy ? "Approving..." : "Approve Custom"}
@@ -1842,78 +2370,128 @@ export default function UserPage() {
       </section>
 
       <section className="card">
-        <div className="card-head">
-          <h2>Referral</h2>
-        </div>
-        {!walletAddress || !user ? (
-          <p className="muted">Connect wallet to load referral data.</p>
-        ) : (
-          <>
-            <p className="muted">{referralPairingNote}</p>
-            <div className="referral-box">
-              <div>
-                <span>Your code</span>
-                <strong className="mono">{user.referralCode}</strong>
-              </div>
-              <div className="ref-link">
-                <span>Your link</span>
-                <strong className="mono">{referralLink}</strong>
-              </div>
-              <button
-                className="btn ghost tiny"
-                onClick={() => navigator.clipboard.writeText(referralLink).catch(() => {})}
-              >
-                Copy Link
-              </button>
-            </div>
-            <div className="stats">
-              <div>
-                <span>Tier 1 volume</span>
-                <strong>{fmt(Number(referrals?.totals?.tier1Volume || 0), 2)} USDC</strong>
-              </div>
-              <div>
-                <span>Tier 2 volume</span>
-                <strong>{fmt(Number(referrals?.totals?.tier2Volume || 0), 2)} USDC</strong>
-              </div>
-              <div>
-                <span>Total volume</span>
-                <strong>{fmt(Number(referrals?.totals?.combinedVolume || 0), 2)} USDC</strong>
-              </div>
-              <div>
-                <span>Direct referrals</span>
-                <strong>{referrals?.tier1?.length || 0}</strong>
-              </div>
-            </div>
-            <div className="grid two">
-              <div className="sub-list">
-                <h3>Tier 1 Referrals</h3>
-                {!referrals?.tier1?.length ? (
-                  <p className="muted">No direct referrals yet.</p>
-                ) : (
-                  referrals.tier1.map((item) => (
-                    <div key={item.walletAddress} className="sub-list-item">
-                      <span className="mono">{item.walletAddress}</span>
-                      <strong>{fmt(Number(item.totalTradingVolume), 2)} USDC</strong>
+        <button className="referral-toggle" onClick={() => setReferralOpen((prev) => !prev)}>
+          <span>Recommend to friends, get bonuses together</span>
+          <span className={`referral-toggle-arrow ${referralOpen ? "open" : ""}`}>{">"}</span>
+        </button>
+        {referralOpen ? (
+          <div className="referral-panel">
+            {!walletAddress || !user ? (
+              <p className="muted">Connect wallet to load referral data.</p>
+            ) : (
+              <>
+                <p className="muted">{referralPairingNote}</p>
+                <p className="muted">
+                  Showing referral tree for wallet: <span className="mono">{walletAddress}</span>
+                </p>
+                <div className="referral-box">
+                  <div>
+                    <span>Your code</span>
+                    <strong className="mono">{user.referralCode}</strong>
+                    <small className="muted">
+                      gain bonuses from your friends trading volume and from friends of friends
+                    </small>
+                  </div>
+                  <div className="ref-link">
+                    <span>Your link</span>
+                    <strong className="mono">{referralLink}</strong>
+                  </div>
+                  <button
+                    className="btn ghost tiny"
+                    onClick={() => navigator.clipboard.writeText(referralLink).catch(() => {})}
+                  >
+                    Copy Link
+                  </button>
+                </div>
+                {canManuallyAddReferrer ? (
+                  <div className="referral-manual">
+                    <p className="muted">I was referred to makeit by:</p>
+                    <div className="approve-row">
+                      <input
+                        value={manualReferralCode}
+                        onChange={(e) => setManualReferralCode(normalizeReferralCode(e.target.value))}
+                        placeholder="Enter referral code"
+                        maxLength={32}
+                      />
+                      <button
+                        className="btn ghost"
+                        disabled={manualReferralBusy}
+                        onClick={applyManualReferral}
+                      >
+                        {manualReferralBusy ? "Applying..." : "Apply Referral Code"}
+                      </button>
                     </div>
-                  ))
-                )}
-              </div>
-              <div className="sub-list">
-                <h3>Tier 2 Referrals</h3>
-                {!referrals?.tier2?.length ? (
-                  <p className="muted">No tier 2 referrals yet.</p>
-                ) : (
-                  referrals.tier2.map((item) => (
-                    <div key={`${item.parentWalletAddress}-${item.walletAddress}`} className="sub-list-item">
-                      <span className="mono">{item.walletAddress}</span>
-                      <strong>{fmt(Number(item.totalTradingVolume), 2)} USDC</strong>
+                  </div>
+                ) : null}
+                {user?.referredBy && referrals?.referrer ? (
+                  <div className="referral-manual">
+                    <p className="muted">I was referred to makeit by:</p>
+                    <div className="sub-list-item">
+                      <span className="mono">
+                        {referrals.referrer.walletAddress}
+                      </span>
+                      <strong className="mono">
+                        code {referrals.referrer.referralCode}
+                      </strong>
                     </div>
-                  ))
-                )}
-              </div>
-            </div>
-          </>
-        )}
+                  </div>
+                ) : null}
+                {user?.referredBy && !(referrals?.tier1?.length > 0) ? (
+                  <p className="muted">
+                    This wallet is a referred account. Friends/Friends of friends list users referred by the current wallet.
+                    Switch to your referrer wallet to see this account under Friends.
+                  </p>
+                ) : null}
+                <div className="stats">
+                  <div>
+                    <span>Friends volume</span>
+                    <strong>{fmt(referralLikeVolumeToNumber(referrals?.totals?.tier1Volume), 2)} USD</strong>
+                  </div>
+                  <div>
+                    <span>Friends of friends volume</span>
+                    <strong>{fmt(referralLikeVolumeToNumber(referrals?.totals?.tier2Volume), 2)} USD</strong>
+                  </div>
+                  <div>
+                    <span>Total volume</span>
+                    <strong>{fmt(referralLikeVolumeToNumber(referrals?.totals?.combinedVolume), 2)} USD</strong>
+                  </div>
+                  <div>
+                    <span>Direct referrals</span>
+                    <strong>{referrals?.tier1?.length || 0}</strong>
+                  </div>
+                </div>
+                <div className="grid two">
+                  <div className="sub-list">
+                    <h3>Friends</h3>
+                    {!referrals?.tier1?.length ? (
+                      <p className="muted">No friends yet.</p>
+                    ) : (
+                      referrals.tier1.map((item) => (
+                        <div key={item.walletAddress} className="sub-list-item">
+                          <span className="mono">{item.walletAddress}</span>
+                          <strong>{fmt(referralLikeVolumeToNumber(item.totalTradingVolume), 2)} USD</strong>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                  <div className="sub-list">
+                    <h3>Friends of friends</h3>
+                    {!referrals?.tier2?.length ? (
+                      <p className="muted">No friends of friends yet.</p>
+                    ) : (
+                      referrals.tier2.map((item) => (
+                        <div key={`${item.parentWalletAddress}-${item.walletAddress}`} className="sub-list-item">
+                          <span className="mono">{item.walletAddress}</span>
+                          <strong>{fmt(referralLikeVolumeToNumber(item.totalTradingVolume), 2)} USD</strong>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        ) : null}
       </section>
 
       <section className="card">
@@ -1930,7 +2508,7 @@ export default function UserPage() {
                   <th>ID</th>
                   <th>Side</th>
                   <th>Margin</th>
-                  <th>Lev</th>
+                  <th>Leverage</th>
                   <th>Entry</th>
                   <th>TP / SL</th>
                   <th>Live PnL</th>
@@ -1963,7 +2541,7 @@ export default function UserPage() {
                         </td>
                         <td className={live.pnl >= 0 ? "success" : "danger"}>
                           {live.pnl >= 0 ? "+" : ""}
-                          {fmt(live.pnl, 2)} USDC
+                          {fmt(live.pnl, 2)} USD
                         </td>
                         <td>
                           <div className="tp-sl-meter">
@@ -2011,7 +2589,7 @@ export default function UserPage() {
                               <div className="trade-detail-meta">
                                 <div>
                                   <span>Current Price</span>
-                                  <strong>{fmt(currentPrice, 4)} USDC</strong>
+                                  <strong>{fmt(currentPrice, 4)} USD</strong>
                                 </div>
                                 <div>
                                   <span>Entry / TP / SL</span>
@@ -2021,13 +2599,13 @@ export default function UserPage() {
                                 </div>
                                 <div>
                                   <span>Notional</span>
-                                  <strong>{fmt(tradeMarginUsdc(trade) * Number(trade.leverage || 0), 2)} USDC</strong>
+                                  <strong>{fmt(tradeMarginUsdc(trade) * Number(trade.leverage || 0), 2)} USD</strong>
                                 </div>
                                 <div>
                                   <span>Live PnL</span>
                                   <strong className={live.pnl >= 0 ? "success" : "danger"}>
                                     {live.pnl >= 0 ? "+" : ""}
-                                    {fmt(live.pnl, 2)} USDC
+                                    {fmt(live.pnl, 2)} USD
                                   </strong>
                                 </div>
                               </div>
@@ -2058,10 +2636,14 @@ export default function UserPage() {
                 <tr>
                   <th>ID</th>
                   <th>Side</th>
+                  <th>Leverage</th>
                   <th>Status</th>
+                  <th>Opened</th>
+                  <th>Closed</th>
                   <th>Entry</th>
                   <th>Exit</th>
                   <th>PnL</th>
+                  <th>PnL Math</th>
                 </tr>
               </thead>
               <tbody>
@@ -2072,7 +2654,12 @@ export default function UserPage() {
                     protocol.feeScaleFactorPpm,
                     activeProtocolVariant
                   );
-                  const exit = tradeExitPriceUsdc(trade);
+                  const pnlMath = explainClosedPnlMath(
+                    trade,
+                    baseTotalFeePpm,
+                    protocol.feeScaleFactorPpm,
+                    activeProtocolVariant
+                  );
                   return (
                   <tr key={trade.onChainTradeId}>
                     <td className="mono">{trade.onChainTradeId}</td>
@@ -2081,14 +2668,18 @@ export default function UserPage() {
                         {getTradeDirection(trade)}
                       </span>
                     </td>
+                    <td>{trade.leverage}x</td>
                     <td>
                       <span className="tag">{closedStatusLabel(trade.status)}</span>
                     </td>
+                    <td className="mono">{formatTradeTimestamp(trade.createdAt)}</td>
+                    <td className="mono">{formatTradeTimestamp(trade.closedAt)}</td>
                     <td>{fmt(tradeEntryPriceUsdc(trade), 4)}</td>
-                    <td>{Number.isFinite(exit) && exit > 0 ? fmt(exit, 4) : "-"}</td>
+                    <td className="mono" title={closeAtDisplay(trade)}>{closeAtDisplay(trade)}</td>
                     <td className={closedPnl >= 0 ? "success" : "danger"}>
                       {fmt(closedPnl, 2)}
                     </td>
+                    <td className="muted">{pnlMath}</td>
                   </tr>
                 )})}
               </tbody>

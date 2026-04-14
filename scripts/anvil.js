@@ -10,7 +10,7 @@ const host = process.env.ANVIL_HOST || "127.0.0.1";
 const port = process.env.ANVIL_PORT || "8545";
 const chainId = process.env.ANVIL_CHAIN_ID || "31337";
 const accounts = process.env.ANVIL_ACCOUNTS || "20";
-const balance = process.env.ANVIL_BALANCE || "10000";
+const balance = process.env.ANVIL_BALANCE || "1000000";
 const silent = String(process.env.ANVIL_SILENT || "0").toLowerCase() === "1";
 const explicitAnvilBin = process.env.ANVIL_BIN;
 const isWsl = Boolean(process.env.WSL_DISTRO_NAME);
@@ -18,10 +18,10 @@ const isWsl = Boolean(process.env.WSL_DISTRO_NAME);
 const candidates = explicitAnvilBin
   ? [explicitAnvilBin]
   : process.platform === "win32"
-    ? [resolve(".foundry", "bin", "anvil.exe"), "anvil"]
+    ? [resolve("foundry", "bin", "anvil.exe"), "anvil"]
     : isWsl
-      ? [resolve(".foundry", "bin", "anvil"), "anvil"]
-      : [resolve(".foundry", "bin", "anvil"), resolve(".foundry", "bin", "anvil.exe"), "anvil"];
+      ? [resolve("foundry", "bin", "anvil"), "anvil"]
+      : [resolve("foundry", "bin", "anvil"), resolve("foundry", "bin", "anvil.exe"), "anvil"];
 
 let cmd = null;
 
@@ -38,7 +38,7 @@ function commandExists(command) {
 }
 
 for (const candidate of candidates) {
-  if (candidate.includes(".foundry")) {
+  if (candidate.includes("foundry")) {
     if (!existsSync(candidate)) continue;
     cmd = candidate;
     break;

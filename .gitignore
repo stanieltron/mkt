@@ -1,32 +1,38 @@
+# --- npm ---
 node_modules/
-local_deploy_nodejs/node_modules/
-cache/
-target_temp/
-target_temp2/
+frontend/.env.local
+
+# --- rust ---
 backend/target/
-backend/target_old/
+target_temp/
+
+# --- foundry tooling (auto-installed via npm run install:foundry) ---
+foundry/
+
+# --- foundry build artifacts ---
+cache/
 out/
-frontend/dist/
+broadcast/
+solidity/cache/
+solidity/out/
 local_deploy_rust/cache/
 local_deploy_rust/out/
 local_deploy_rust/broadcast/
 local_deploy_rust/deployments/
-scenarios/model-v4-real-data/binance-data/
+
+# --- environment files ---
+# .env.example files are templates and ARE committed
+# .env files contain real secrets/generated values and are NOT committed
+.env
+!.env.example
+local_deploy_rust/.env
+e2e/.env
+frontend/.env
+
+# --- generated/runtime logs ---
 *.log
+e2e/*.log
+
+# --- misc ---
 __pycache__/
-solidity_sepolia/cache/
-solidity_sepolia/out/
-solidity_sepolia/broadcast/
-solidity_sepolia/deployments/
-solidity_local/cache/
-solidity_local/out/
-solidity_local/broadcast/
-solidity_local/deployments/
-backend/node_modules/
-backend/.env.local
-frontend/.env.local
-.env.local
-broadcast/
-.foundry/
-task.md
-task2.md
+scenarios/model-v4-real-data/binance-data/

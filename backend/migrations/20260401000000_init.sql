@@ -6,7 +6,7 @@ CREATE TABLE "User" (
     "referralCode" VARCHAR(32) NOT NULL UNIQUE,
     "referredBy" INTEGER,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "totalTradingVolume" DECIMAL(40, 6) NOT NULL DEFAULT 0,
+    "totalTradingVolume" DECIMAL(78, 0) NOT NULL DEFAULT 0,
     CONSTRAINT "User_referredBy_fkey" FOREIGN KEY ("referredBy") REFERENCES "User"(id) ON DELETE SET NULL ON UPDATE CASCADE
 );
 
@@ -18,15 +18,15 @@ CREATE TABLE "Trade" (
     "userId" INTEGER NOT NULL,
     direction VARCHAR(16) NOT NULL,
     leverage INTEGER NOT NULL,
-    margin DECIMAL(40, 6) NOT NULL,
-    "entryPrice" DECIMAL(40, 18) NOT NULL,
-    "tpPrice" DECIMAL(40, 18) NOT NULL,
-    "slPrice" DECIMAL(40, 18) NOT NULL,
-    "exitPrice" DECIMAL(40, 18),
-    "soldWeth" DECIMAL(40, 18),
-    "boughtWeth" DECIMAL(40, 18),
+    margin DECIMAL(78, 0) NOT NULL,
+    "entryPrice" DECIMAL(78, 0) NOT NULL,
+    "tpPrice" DECIMAL(78, 0) NOT NULL,
+    "slPrice" DECIMAL(78, 0) NOT NULL,
+    "exitPrice" DECIMAL(78, 0),
+    "soldWeth" DECIMAL(78, 0),
+    "boughtWeth" DECIMAL(78, 0),
     status "TradeStatus" NOT NULL DEFAULT 'OPEN',
-    pnl DECIMAL(40, 6),
+    pnl DECIMAL(78, 0),
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "closedAt" TIMESTAMP(3),
     CONSTRAINT "Trade_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"(id) ON DELETE CASCADE ON UPDATE CASCADE
@@ -37,7 +37,7 @@ CREATE INDEX "Trade_status_createdAt_idx" ON "Trade"(status, "createdAt");
 
 CREATE TABLE "PriceSample" (
     id SERIAL PRIMARY KEY,
-    price DECIMAL(40, 18) NOT NULL,
+    price DECIMAL(78, 0) NOT NULL,
     timestamp TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 

@@ -46,6 +46,7 @@ const ORACLE_ABI = [
 const SWAP_ADAPTER_ABI = [
   "function USDC() view returns (address)",
   "function WETH() view returns (address)",
+  "function pool() view returns (address)",
   "function buyWETHWithExactUSDC(uint256 usdcIn6,address payer,address recipient) returns (uint256 usdcSpent6,uint256 wethOut18)",
   "function sellWETHForExactUSDC(uint256 usdcNeeded6,address payer,address recipient) returns (uint256 wethSold18,uint256 usdcOut6)"
 ];

@@ -13,10 +13,10 @@ pub enum TradeStatus {
     Liquidated,
 }
 
-/// All NUMERIC(40,x) columns are mapped to BigDecimal — the industry standard
-/// for high-precision blockchain decimals in Rust. This preserves full precision
-/// across USDC (6 dec), WETH (18 dec), and oracle prices (18 dec) without any
-/// floating-point loss.
+/// On-chain values are stored as raw integers in Postgres DECIMAL(78,0),
+/// then mapped to BigDecimal in Rust to avoid floating-point loss.
+/// Human-readable unit conversion is done in the frontend display layer.
+
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct User {
@@ -76,6 +76,33 @@ pub struct Trade {
     #[sqlx(rename = "closedAt")]
     #[serde(rename = "closedAt")]
     pub closed_at: Option<NaiveDateTime>,
+    #[sqlx(rename = "openTxHash")]
+    #[serde(rename = "openTxHash")]
+    pub open_tx_hash: Option<String>,
+    #[sqlx(rename = "openBlockNumber")]
+    #[serde(rename = "openBlockNumber")]
+    pub open_block_number: Option<i64>,
+    #[sqlx(rename = "closeTxHash")]
+    #[serde(rename = "closeTxHash")]
+    pub close_tx_hash: Option<String>,
+    #[sqlx(rename = "closeBlockNumber")]
+    #[serde(rename = "closeBlockNumber")]
+    pub close_block_number: Option<i64>,
+    #[sqlx(rename = "closeReason")]
+    #[serde(rename = "closeReason")]
+    pub close_reason: Option<String>,
+    #[sqlx(rename = "payoutUsdc")]
+    #[serde(rename = "payoutUsdc")]
+    pub payout_usdc: Option<BigDecimal>,
+    #[sqlx(rename = "settlementAction")]
+    #[serde(rename = "settlementAction")]
+    pub settlement_action: Option<String>,
+    #[sqlx(rename = "settlementUsdcAmount")]
+    #[serde(rename = "settlementUsdcAmount")]
+    pub settlement_usdc_amount: Option<BigDecimal>,
+    #[sqlx(rename = "settlementWethAmount")]
+    #[serde(rename = "settlementWethAmount")]
+    pub settlement_weth_amount: Option<BigDecimal>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]

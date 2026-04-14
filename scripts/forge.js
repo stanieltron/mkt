@@ -10,10 +10,10 @@ const isWsl = Boolean(process.env.WSL_DISTRO_NAME);
 const candidates = explicitForgeBin
   ? [explicitForgeBin]
   : process.platform === "win32"
-    ? [".foundry/bin/forge.exe", "forge"]
+    ? ["foundry/bin/forge.exe", "forge"]
     : isWsl
-      ? [".foundry/bin/forge", "forge"]
-      : [".foundry/bin/forge", ".foundry/bin/forge.exe", "forge"];
+      ? ["foundry/bin/forge", "forge"]
+      : ["foundry/bin/forge", "foundry/bin/forge.exe", "forge"];
 
 for (const cmd of candidates) {
   if (cmd.includes("/") && !existsSync(cmd)) continue;
@@ -27,9 +27,10 @@ for (const cmd of candidates) {
   process.exit(res.status ?? 1);
 }
 
-console.error("forge not found. Install Foundry or place binary in .foundry/bin/");
+console.error("forge not found. Run: npm run install:foundry");
+console.error("  This will download forge/anvil/cast/chisel and forge-std into foundry/");
 if (isWsl) {
-  console.error("WSL detected. Install Linux Foundry in WSL (or set FORGE_BIN to a Linux forge path).");
+  console.error("WSL detected. Set FORGE_BIN to a Linux forge path, or install via: curl -L https://foundry.paradigm.xyz | bash && foundryup");
 }
-console.error("Linux/macOS install: curl -L https://foundry.paradigm.xyz | bash && foundryup");
+console.error("Manual install: https://book.getfoundry.sh/getting-started/installation");
 process.exit(1);

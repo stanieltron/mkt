@@ -21,6 +21,9 @@ const solidityContractRootName = "solidity";
 const solidityLocalRoot = resolve(workspaceRoot, solidityLocalRootName);
 const solidityContractRoot = resolve(workspaceRoot, solidityContractRootName);
 const deploymentDir = resolve(solidityLocalRoot, "deployments");
+const localDeployEnvPath = resolve(solidityLocalRoot, ".env");
+const e2eRoot = resolve(workspaceRoot, "e2e");
+const e2eEnvPath = resolve(e2eRoot, ".env");
 mkdirSync(deploymentDir, { recursive: true });
 
 const mnemonic =
@@ -37,9 +40,10 @@ const postgresPort = process.env.POSTGRES_PORT || process.env.PGPORT || "5434";
 const postgresDb = process.env.POSTGRES_DB || process.env.PGDATABASE || "appdb";
 const postgresUser = process.env.POSTGRES_USER || process.env.PGUSER || "app";
 const postgresPassword = process.env.POSTGRES_PASSWORD || process.env.PGPASSWORD || "app";
+const redisUrl = process.env.REDIS_URL || "redis://127.0.0.1:6379";
 const databaseUrl =
   process.env.DATABASE_URL ||
-  `postgresql://${postgresUser}:${postgresPassword}@${postgresHost}:${postgresPort}/${postgresDb}?schema=public`;
+  `postgresql://${postgresUser}:${postgresPassword}@${postgresHost}:${postgresPort}/${postgresDb}`;
 const adminUsername = process.env.ADMIN_USERNAME || "admin";
 const adminPassword = process.env.ADMIN_PASSWORD || "admin123";
 
@@ -57,6 +61,53 @@ function envToNumber(name, defaultValue) {
 
 function deriveWallet(index) {
   return HDNodeWallet.fromPhrase(mnemonic, undefined, `m/44'/60'/0'/0/${index}`);
+}
+
+function assertUniquePrivateKeys(walletMap) {
+  const seen = new Map();
+  for (const [name, wallet] of Object.entries(walletMap)) {
+    const pk = String(wallet?.privateKey || "").toLowerCase();
+    if (!pk) continue;
+    if (seen.has(pk)) {
+      throw new Error(`Duplicate private key detected for ${name} and ${seen.get(pk)}`);
+    }
+    seen.set(pk, name);
+  }
+}
+
+async function fundEthFromAnvilWallets({
+  provider,
+  to,
+  amountWei,
+  reserveWeiPerWallet = 1n * 10n ** 18n,
+  startIndex = 1,
+  excludeAddress = "",
+}) {
+  if (amountWei <= 0n) return;
+  let remaining = BigInt(amountWei);
+  const excluded = String(excludeAddress || "").toLowerCase();
+
+  for (let i = startIndex; i < 20 && remaining > 0n; i += 1) {
+    const funder = new Wallet(deriveWallet(i).privateKey, provider);
+    const funderAddress = await funder.getAddress();
+    if (excluded && funderAddress.toLowerCase() === excluded) continue;
+    const balance = await provider.getBalance(funderAddress);
+    if (balance <= reserveWeiPerWallet) continue;
+
+    const available = balance - reserveWeiPerWallet;
+    const sendAmount = available < remaining ? available : remaining;
+    if (sendAmount <= 0n) continue;
+
+    const tx = await funder.sendTransaction({ to, value: sendAmount });
+    await tx.wait();
+    remaining -= sendAmount;
+  }
+
+  if (remaining > 0n) {
+    throw new Error(
+      `Unable to fund faucet ETH target. Missing ${remaining.toString()} wei after scanning Anvil wallets.`
+    );
+  }
 }
 
 async function assertRpcAvailable(provider) {
@@ -222,30 +273,49 @@ function envText(values) {
   );
 }
 
+function formatEth(wei) {
+  const whole = wei / 10n ** 18n;
+  const frac = (wei % 10n ** 18n).toString().padStart(18, "0").slice(0, 6);
+  return `${whole.toString()}.${frac}`;
+}
+
 function frontendGeneratedNetworkText(values) {
   return `export const GENERATED_NETWORK = ${JSON.stringify(values, null, 2)};\n`;
 }
 
 function writeEnvFiles(deployment, wallets) {
-  const rootEnv = {
+  const testWalletEnv = {};
+  for (let i = 1; i <= 10; i += 1) {
+    const key = `test${i}`;
+    const wallet = wallets[key];
+    if (!wallet) continue;
+    testWalletEnv[`TEST_WALLET_${i}_PRIVATE_KEY`] = wallet.privateKey;
+    testWalletEnv[`TEST_WALLET_${i}_ADDRESS`] = wallet.address;
+  }
+
+  const localDeployEnv = {
     PROTOCOL_VARIANT: deployment.protocolVariant,
     LOCAL_MODE: "true",
     RPC_URL: rpcUrl,
     CHAIN_ID: "31337",
+    CHAIN_NAME: "Anvil Local",
     DEPLOYER_PRIVATE_KEY: wallets.deployer.privateKey,
     USER1_PRIVATE_KEY: wallets.user1.privateKey,
     USER2_PRIVATE_KEY: wallets.user2.privateKey,
     RUNNER_PRIVATE_KEY: wallets.runner.privateKey,
     BOT_PRIVATE_KEY: wallets.bot.privateKey,
-    FAUCET_PRIVATE_KEY: wallets.runner.privateKey,
-    FAUCET_ETH_WEI: "20000000000000000",
+    FAUCET_PRIVATE_KEY: wallets.faucet.privateKey,
+    SWAPPER_PRIVATE_KEY: wallets.swapper.privateKey,
+    FAUCET_ETH_WEI: deployment.faucet?.ethWei || "1000000000000000000",
     FAUCET_USDC_6: "1000000000",
     FAUCET_COOLDOWN_MS: "3600000",
+    FAUCET_TARGET_CLAIMS: deployment.faucet?.targetClaims || "1000000",
     LOCAL_BACKEND_UPSTREAM_PORT: backendUpstreamPort,
     USER1_ADDRESS: wallets.user1.address,
     USER2_ADDRESS: wallets.user2.address,
     RUNNER_ADDRESS: wallets.runner.address,
     BOT_ADDRESS: wallets.bot.address,
+    SWAPPER_ADDRESS: wallets.swapper.address,
     FAUCET_ADDRESS: deployment.faucet?.address || "",
     WETH_ADDRESS: deployment.weth,
     USDC_ADDRESS: deployment.usdc,
@@ -263,6 +333,7 @@ function writeEnvFiles(deployment, wallets) {
     FRONTEND_PORT: frontendPort,
     BACKEND_URL: backendUrl,
     DATABASE_URL: databaseUrl,
+    REDIS_URL: redisUrl,
     POSTGRES_HOST: postgresHost,
     POSTGRES_PORT: postgresPort,
     POSTGRES_DB: postgresDb,
@@ -277,65 +348,37 @@ function writeEnvFiles(deployment, wallets) {
     SWAP_RUNNER_VOLATILITY: "0.20",
     LIQUIDATION_BOT_INTERVAL_MS: "2000",
     INITIAL_PRICE_USDC_6_PER_WETH: deployment.initialPriceUsdc6PerWeth,
+    ...testWalletEnv,
   };
 
-  const backendDir = resolve(workspaceRoot, "backend");
   const frontendDir = resolve(workspaceRoot, "frontend");
-  mkdirSync(backendDir, { recursive: true });
   mkdirSync(frontendDir, { recursive: true });
 
-  const backendEnv = {
-    NODE_ENV: "development",
-    PROTOCOL_VARIANT: deployment.protocolVariant,
-    LOCAL_MODE: "true",
-    PORT: backendUpstreamPort,
-    RPC_URL: rpcUrl,
-    CHAIN_ID: "31337",
-    DATABASE_URL: databaseUrl,
-    MAKEIT_ADDRESS: deployment.makeit,
-    ORACLE_ADDRESS: deployment.oracle,
-    SWAP_ADAPTER_ADDRESS: deployment.swapAdapter,
-    UNISWAP_POOL_ADDRESS: deployment.pool,
-    RUNNER_PRIVATE_KEY: wallets.runner.privateKey,
-    BOT_PRIVATE_KEY: wallets.bot.privateKey,
-    SWAP_RUNNER_ENABLED: rootEnv.SWAP_RUNNER_ENABLED,
-    SWAP_RUNNER_INTERVAL_MS: rootEnv.SWAP_RUNNER_INTERVAL_MS,
-    SWAP_RUNNER_BASE_NOTIONAL_USDC_6: rootEnv.SWAP_RUNNER_BASE_NOTIONAL_USDC_6,
-    SWAP_RUNNER_TREND: rootEnv.SWAP_RUNNER_TREND,
-    SWAP_RUNNER_VOLATILITY: rootEnv.SWAP_RUNNER_VOLATILITY,
-    LIQUIDATION_BOT_INTERVAL_MS: rootEnv.LIQUIDATION_BOT_INTERVAL_MS,
-    ADMIN_USERNAME: adminUsername,
-    ADMIN_PASSWORD: adminPassword,
-  };
+  mkdirSync(solidityLocalRoot, { recursive: true });
+  mkdirSync(e2eRoot, { recursive: true });
+  writeFileSync(localDeployEnvPath, envText(localDeployEnv), "utf8");
 
-  const frontendEnv = {
-    VITE_LOCAL_MODE: "true",
-    VITE_RPC_URL: rpcUrl,
-    VITE_CHAIN_ID: "31337",
-    VITE_MAKEIT_ADDRESS: deployment.makeit,
-    VITE_PROTOCOL_VARIANT_DEFAULT: deployment.protocolVariant,
-    VITE_BACKEND_PROTOCOL_VARIANT: deployment.protocolVariant,
-    VITE_ORACLE_ADDRESS: deployment.oracle,
-    VITE_SWAP_ADAPTER_ADDRESS: deployment.swapAdapter,
-    VITE_USDC_ADDRESS: deployment.usdc,
-    VITE_USDT_ADDRESS: deployment.usdt,
-    VITE_WETH_ADDRESS: deployment.weth,
-    VITE_UNISWAP_POOL_ADDRESS: deployment.pool,
-    VITE_BACKEND_URL: backendUrl,
-    VITE_ADMIN_USERNAME: adminUsername,
-    VITE_ADMIN_PASSWORD: adminPassword,
+  const e2eEnv = {
+    RPC_URL: localDeployEnv.RPC_URL,
+    BACKEND_URL: localDeployEnv.BACKEND_URL,
+    LOCAL_BACKEND_UPSTREAM_PORT: localDeployEnv.LOCAL_BACKEND_UPSTREAM_PORT,
+    DATABASE_URL: localDeployEnv.DATABASE_URL,
+    DEPLOYER_PRIVATE_KEY: localDeployEnv.DEPLOYER_PRIVATE_KEY,
+    MAKEIT_ADDRESS: localDeployEnv.MAKEIT_ADDRESS,
+    ORACLE_ADDRESS: localDeployEnv.ORACLE_ADDRESS,
+    SWAP_ADAPTER_ADDRESS: localDeployEnv.SWAP_ADAPTER_ADDRESS,
+    WETH_ADDRESS: localDeployEnv.WETH_ADDRESS,
+    USDC_ADDRESS: localDeployEnv.USDC_ADDRESS,
+    SWAPPER_PRIVATE_KEY: localDeployEnv.SWAPPER_PRIVATE_KEY,
+    ...testWalletEnv,
   };
-
-  writeFileSync(resolve(workspaceRoot, ".env.local"), envText(rootEnv), "utf8");
-  writeFileSync(resolve(backendDir, ".env"), envText(backendEnv), "utf8");
-  writeFileSync(resolve(backendDir, ".env.local"), envText(backendEnv), "utf8");
-  writeFileSync(resolve(frontendDir, ".env.local"), envText(frontendEnv), "utf8");
+  writeFileSync(e2eEnvPath, envText(e2eEnv), "utf8");
 
   const frontendGeneratedDir = resolve(frontendDir, "src", "generated");
   mkdirSync(frontendGeneratedDir, { recursive: true });
   const frontendGeneratedNetwork = {
-    chainId: Number(rootEnv.CHAIN_ID),
-    chainName: Number(rootEnv.CHAIN_ID) === 31337 ? "Anvil Local" : `Chain ${rootEnv.CHAIN_ID}`,
+    chainId: Number(localDeployEnv.CHAIN_ID),
+    chainName: Number(localDeployEnv.CHAIN_ID) === 31337 ? "Anvil Local" : `Chain ${localDeployEnv.CHAIN_ID}`,
     makeit: deployment.makeit,
     protocolVariant: deployment.protocolVariant,
     backendProtocolVariant: deployment.protocolVariant,
@@ -346,7 +389,7 @@ function writeEnvFiles(deployment, wallets) {
     usdt: deployment.usdt,
     weth: deployment.weth,
     pool: deployment.pool,
-    rpcUrl: rootEnv.RPC_URL,
+    rpcUrl: localDeployEnv.RPC_URL,
     backendUrl: backendUrl,
     localMode: true,
     adminDefaultUser: adminUsername,
@@ -370,7 +413,20 @@ async function main() {
     user2: deriveWallet(2),
     runner: deriveWallet(3),
     bot: deriveWallet(4),
+    faucet: deriveWallet(5),
+    swapper: deriveWallet(6),
+    test1: deriveWallet(10),
+    test2: deriveWallet(11),
+    test3: deriveWallet(12),
+    test4: deriveWallet(13),
+    test5: deriveWallet(14),
+    test6: deriveWallet(15),
+    test7: deriveWallet(16),
+    test8: deriveWallet(17),
+    test9: deriveWallet(18),
+    test10: deriveWallet(19),
   };
+  assertUniquePrivateKeys(hdWallets);
 
   const wallets = {
     deployer: new NonceManager(new Wallet(hdWallets.deployer.privateKey, provider)),
@@ -378,6 +434,8 @@ async function main() {
     user2: hdWallets.user2,
     runner: hdWallets.runner,
     bot: hdWallets.bot,
+    faucet: hdWallets.faucet,
+    swapper: hdWallets.swapper,
   };
 
   runForgeBuild(solidityLocalRootName);
@@ -399,73 +457,67 @@ async function main() {
     v3Factory: loadArtifact(
       resolve(
         workspaceRoot,
-        "node_modules",
-        "@uniswap",
+        "solidity",
+        "vendor_artifacts",
+        "uniswap",
         "v3-core",
-        "artifacts",
         "contracts",
-        "UniswapV3Factory.sol",
         "UniswapV3Factory.json"
       )
     ),
     v3Pool: loadArtifact(
       resolve(
         workspaceRoot,
-        "node_modules",
-        "@uniswap",
+        "solidity",
+        "vendor_artifacts",
+        "uniswap",
         "v3-core",
-        "artifacts",
         "contracts",
-        "UniswapV3Pool.sol",
         "UniswapV3Pool.json"
       )
     ),
     swapRouter: loadArtifact(
       resolve(
         workspaceRoot,
-        "node_modules",
-        "@uniswap",
+        "solidity",
+        "vendor_artifacts",
+        "uniswap",
         "v3-periphery",
-        "artifacts",
         "contracts",
-        "SwapRouter.sol",
         "SwapRouter.json"
       )
     ),
     positionDescriptor: loadArtifact(
       resolve(
         workspaceRoot,
-        "node_modules",
-        "@uniswap",
+        "solidity",
+        "vendor_artifacts",
+        "uniswap",
         "v3-periphery",
-        "artifacts",
         "contracts",
-        "NonfungibleTokenPositionDescriptor.sol",
         "NonfungibleTokenPositionDescriptor.json"
       )
     ),
     nftDescriptorLib: loadArtifact(
       resolve(
         workspaceRoot,
-        "node_modules",
-        "@uniswap",
+        "solidity",
+        "vendor_artifacts",
+        "uniswap",
         "v3-periphery",
-        "artifacts",
         "contracts",
         "libraries",
-        "NFTDescriptor.sol",
         "NFTDescriptor.json"
       )
     ),
     positionManager: loadArtifact(
       resolve(
         workspaceRoot,
-        "node_modules",
-        "@uniswap",
+        "solidity",
+        "vendor_artifacts",
+        "uniswap",
         "v3-periphery",
-        "artifacts",
         "contracts",
-        "NonfungiblePositionManager.sol",
         "NonfungiblePositionManager.json"
       )
     ),
@@ -484,10 +536,14 @@ async function main() {
     initialLiquidityUsdc6: envToBigInt("INITIAL_LIQUIDITY_USDC_6", "1200000000000"),
     makeitFundWeth18: envToBigInt("MAKEIT_FUND_WETH_18", "10000000000000000000"),
     makeitFundUsdc6: envToBigInt("MAKEIT_FUND_USDC_6", "0"),
-    runnerWeth18: envToBigInt("RUNNER_WETH_18", "120000000000000000000"),
-    runnerUsdc6: envToBigInt("RUNNER_USDC_6", "500000000000"),
-    runnerUsdt6: envToBigInt("RUNNER_USDT_6", "500000000000"),
+    runnerWeth18: envToBigInt("RUNNER_WETH_18", "12000000000000000000000"),
+    runnerUsdc6: envToBigInt("RUNNER_USDC_6", "50000000000000000000000"),
+    runnerUsdt6: envToBigInt("RUNNER_USDT_6", "50000000000000000000000"),
     runnerNativeTopUpWei: envToBigInt("RUNNER_NATIVE_TOPUP_WEI", "0"),
+    swapperWeth18: envToBigInt("SWAPPER_WETH_18", "240000000000000000000"),
+    swapperUsdc6: envToBigInt("SWAPPER_USDC_6", "2000000000000"),
+    swapperUsdt6: envToBigInt("SWAPPER_USDT_6", "2000000000000"),
+    swapperNativeTopUpWei: envToBigInt("SWAPPER_NATIVE_TOPUP_WEI", "0"),
     botWeth18: envToBigInt("BOT_WETH_18", "60000000000000000000"),
     botUsdc6: envToBigInt("BOT_USDC_6", "200000000000"),
     botUsdt6: envToBigInt("BOT_USDT_6", "200000000000"),
@@ -500,16 +556,41 @@ async function main() {
     user2Usdc6: envToBigInt("USER2_USDC_6", "120000000000"),
     user2Usdt6: envToBigInt("USER2_USDT_6", "120000000000"),
     user2NativeTopUpWei: envToBigInt("USER2_NATIVE_TOPUP_WEI", "0"),
-    faucetClaimEthWei: envToBigInt("FAUCET_ETH_WEI", "20000000000000000"),
+    faucetClaimEthWei: envToBigInt("FAUCET_ETH_WEI", "1000000000000000000"),
     faucetClaimUsdc6: envToBigInt("FAUCET_USDC_6", "1000000000"),
     faucetCooldownMs: envToBigInt("FAUCET_COOLDOWN_MS", "3600000"),
-    faucetFundEthWei: envToBigInt("FAUCET_FUND_ETH_WEI", "5000000000000000000"),
-    faucetFundUsdc6: envToBigInt("FAUCET_FUND_USDC_6", "100000000000"),
+    faucetTargetClaims: envToBigInt("FAUCET_TARGET_CLAIMS", "1000000"),
+    faucetFundEthWei: 0n,
+    faucetFundUsdc6: 0n,
   };
+
+  cfg.faucetFundEthWei = envToBigInt(
+    "FAUCET_FUND_ETH_WEI",
+    (cfg.faucetClaimEthWei * cfg.faucetTargetClaims).toString()
+  );
+  cfg.faucetFundUsdc6 = envToBigInt(
+    "FAUCET_FUND_USDC_6",
+    (cfg.faucetClaimUsdc6 * cfg.faucetTargetClaims).toString()
+  );
 
   const deployer = wallets.deployer;
   const deployerAddress = await deployer.getAddress();
   console.log(`Deployer: ${deployerAddress}`);
+
+  const requiredWethBackingWei =
+    cfg.deployerWethMint18 +
+    cfg.runnerWeth18 +
+    cfg.swapperWeth18 +
+    cfg.botWeth18 +
+    cfg.user1Weth18 +
+    cfg.user2Weth18;
+  const deployerBalanceWei = await provider.getBalance(deployerAddress);
+  if (deployerBalanceWei < requiredWethBackingWei) {
+    throw new Error(
+      `Insufficient deployer ETH for MockWETH mint backing. Need ${formatEth(requiredWethBackingWei)} ETH, ` +
+      `have ${formatEth(deployerBalanceWei)} ETH. Reduce *_WETH_18 env values (especially RUNNER_WETH_18).`
+    );
+  }
 
   const weth = await deployContract("MockWETH", artifacts.mockWeth, deployer);
   const wethAddress = await addressOf(weth, "MockWETH");
@@ -595,6 +676,17 @@ async function main() {
     usdc,
     usdt,
     signer: deployer,
+    recipient: wallets.swapper.address,
+    wethAmount18: cfg.swapperWeth18,
+    usdcAmount6: cfg.swapperUsdc6,
+    usdtAmount6: cfg.swapperUsdt6,
+    nativeTopupWei: cfg.swapperNativeTopUpWei,
+  });
+  await mintAndFund({
+    weth,
+    usdc,
+    usdt,
+    signer: deployer,
     recipient: wallets.bot.address,
     wethAmount18: cfg.botWeth18,
     usdcAmount6: cfg.botUsdc6,
@@ -629,8 +721,13 @@ async function main() {
     await tx.wait();
   }
   if (cfg.faucetFundEthWei > 0n) {
-    const tx = await deployer.sendTransaction({ to: localFaucetAddress, value: cfg.faucetFundEthWei });
-    await tx.wait();
+    await fundEthFromAnvilWallets({
+      provider,
+      to: localFaucetAddress,
+      amountWei: cfg.faucetFundEthWei,
+      startIndex: 1,
+      excludeAddress: deployerAddress,
+    });
   }
 
   const [token0, token1] = sortTokens(wethAddress, usdcAddress);
@@ -766,11 +863,21 @@ async function main() {
     maxLeverage: cfg.maxLeverage,
     runnerAddress: wallets.runner.address,
     botAddress: wallets.bot.address,
+    swapperAddress: wallets.swapper.address,
+    testWallets: Array.from({ length: 10 }, (_, idx) => {
+      const i = idx + 1;
+      const wallet = hdWallets[`test${i}`];
+      return {
+        index: i,
+        address: wallet.address,
+      };
+    }),
     faucet: {
       address: localFaucetAddress,
       ethWei: cfg.faucetClaimEthWei.toString(),
       usdc6: cfg.faucetClaimUsdc6.toString(),
       cooldownMs: Number(cfg.faucetCooldownMs),
+      targetClaims: cfg.faucetTargetClaims.toString(),
       fundEthWei: cfg.faucetFundEthWei.toString(),
       fundUsdc6: cfg.faucetFundUsdc6.toString(),
     },
@@ -783,7 +890,8 @@ async function main() {
   writeEnvFiles(deployment, hdWallets);
 
   console.log(`Deployment written to ${outFile} (${protocolVariant})`);
-  console.log("Generated .env.local, backend/.env, backend/.env.local, frontend/.env.local");
+  console.log(`Generated local deploy env: ${localDeployEnvPath}`);
+  console.log(`Generated e2e env: ${e2eEnvPath}`);
 }
 
 if (!existsSync(resolve(workspaceRoot, "scripts", "forge.js"))) {

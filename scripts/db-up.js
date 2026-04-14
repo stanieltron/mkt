@@ -61,9 +61,8 @@ function main() {
     }
   }
 
-  const upRes = runCompose(compose, ["up", "-d", "db"]);
+  const upRes = runCompose(compose, ["up", "-d", "db", "redis"]);
   process.exit(upRes.status ?? 1);
 }
 
 main();
-

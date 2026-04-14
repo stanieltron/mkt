@@ -7,7 +7,7 @@
  * What it does, in order:
  *   1. Boot Anvil (local blockchain) — reuses existing if already running
  *   2. Deploy smart contracts via deploy-local.js
- *      → writes .env.local, backend/.env, frontend/.env.local
+ *      → writes local_deploy_rust/.env and e2e/.env
  *   3. Start Postgres (docker compose up -d db)
  *   4. Init DB schema from backend/migrations/*.sql via db-init-rust.js
  *   5. Start Rust backend with cargo-watch (hot reload)
@@ -58,9 +58,8 @@ function loadEnvFile(filePath, override = false) {
   }
 }
 
-function loadRootEnv(override = false) {
-  loadEnvFile(resolve(root, ".env"), override);
-  loadEnvFile(resolve(root, ".env.local"), override);
+function loadLocalDeployEnv(override = false) {
+  loadEnvFile(resolve(root, "local_deploy_rust", ".env"), override);
 }
 
 function ensureWindowsRustBuildWorkarounds(baseEnv) {
@@ -230,19 +229,20 @@ function cargoWatchAvailable() {
 async function main() {
   process.on("SIGINT", () => shutdown(0));
   process.on("SIGTERM", () => shutdown(0));
-  loadRootEnv();
+  // Intentionally do NOT load local deploy env before local deploy.
+  // Local deploy is the source of truth and will generate/update local_deploy_rust/.env.
 
   const anvilHost = process.env.ANVIL_HOST || "127.0.0.1";
   const anvilPort = Number(process.env.ANVIL_PORT || 8545);
   const anvilCheckHost = anvilHost === "0.0.0.0" ? "127.0.0.1" : anvilHost;
-  const rpcUrl = process.env.RPC_URL || `http://${anvilCheckHost}:${anvilPort}`;
+  const anvilRpcUrl = `http://${anvilCheckHost}:${anvilPort}`;
 
   // ── 1. Anvil ──────────────────────────────────────────────────────────────
   if (await portIsOpen(anvilCheckHost, anvilPort)) {
-    if (!(await isAnvilRpc(rpcUrl))) throw new Error(`Port ${anvilPort} is in use by a non-Anvil process`);
+    if (!(await isAnvilRpc(anvilRpcUrl))) throw new Error(`Port ${anvilPort} is in use by a non-Anvil process`);
     if (freshMode) {
       console.log("[dev-rust] resetting existing Anvil chain...");
-      await rpcCall(rpcUrl, "anvil_reset", []);
+      await rpcCall(anvilRpcUrl, "anvil_reset", []);
     } else {
       console.log("[dev-rust] reusing existing Anvil instance");
     }
@@ -251,7 +251,7 @@ async function main() {
       env: { ...process.env, ANVIL_SILENT: process.env.ANVIL_SILENT || "1" },
     });
     await waitForPort(anvilCheckHost, anvilPort, 120_000);
-    if (!(await isAnvilRpc(rpcUrl))) throw new Error("Anvil started but RPC is not responding correctly");
+    if (!(await isAnvilRpc(anvilRpcUrl))) throw new Error("Anvil started but RPC is not responding correctly");
     console.log("[dev-rust] Anvil is up");
   }
 
@@ -259,23 +259,37 @@ async function main() {
   runStep(
     `Deploying contracts (${protocolVariant})`,
     "node",
-    ["scripts/deploy-local.js", `--variant=${protocolVariant}`]
+    ["scripts/deploy-local.js", `--variant=${protocolVariant}`],
+    {
+      env: {
+        ...process.env,
+        RPC_URL: anvilRpcUrl,
+        ANVIL_RPC_URL: anvilRpcUrl,
+      },
+    }
   );
-  // Reload env — deploy-local.js writes .env.local with all addresses
-  loadRootEnv(true);
+  // Reload env — deploy-local.js writes local_deploy_rust/.env with local addresses/keys
+  loadLocalDeployEnv(true);
 
   // ── 3. Postgres ───────────────────────────────────────────────────────────
   const pgHost = process.env.POSTGRES_HOST || "127.0.0.1";
   const pgPort = Number(process.env.POSTGRES_PORT || 5434);
+  const redisHost = process.env.REDIS_HOST || "127.0.0.1";
+  const redisPort = Number(process.env.REDIS_PORT || 6379);
 
-  if (await portIsOpen(pgHost, pgPort)) {
-    console.log("[dev-rust] Postgres already running, skipping docker compose up");
+  const pgUp = await portIsOpen(pgHost, pgPort);
+  const redisUp = await portIsOpen(redisHost, redisPort);
+
+  if (pgUp && redisUp) {
+    console.log("[dev-rust] Postgres and Redis already running, skipping docker compose up");
   } else {
     runStep("Starting Postgres (docker compose)", "node", [
       "scripts/db-up.js",
       ...(freshMode ? ["--fresh"] : []),
     ]);
   }
+  await waitForPort(pgHost, pgPort, 45_000);
+  await waitForPort(redisHost, redisPort, 45_000);
 
   // ── 4. DB schema init ─────────────────────────────────────────────────────
   runStep(
@@ -366,10 +380,10 @@ async function main() {
 
   console.log(
     `\n[dev-rust] ✅ full local environment is up!\n` +
-    `  frontend  → http://127.0.0.1:${frontendPort}\n` +
-    `  backend   → http://127.0.0.1:${backendPort}\n` +
-    `  rpc       → ${rpcUrl}\n` +
-    `  db        → postgres://127.0.0.1:${pgPort}\n`
+      `  frontend  → http://127.0.0.1:${frontendPort}\n` +
+      `  backend   → http://127.0.0.1:${backendPort}\n` +
+      `  rpc       → ${anvilRpcUrl}\n` +
+      `  db        → postgres://127.0.0.1:${pgPort}\n`
   );
 }
 

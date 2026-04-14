@@ -1,5 +1,5 @@
 const { Contract, formatUnits } = require("ethers");
-const { ERC20_ABI, SWAP_ADAPTER_ABI, ORACLE_ABI } = require("../lib/abis");
+const { ERC20_ABI, SWAP_ADAPTER_ABI, ORACLE_ABI, POOL_ABI } = require("../lib/abis");
 const { clamp, nowIso } = require("../lib/utils");
 
 class SwapRunnerService {
@@ -8,13 +8,16 @@ class SwapRunnerService {
     signer,
     swapAdapterAddress,
     oracleAddress,
+    swapperAddress,
     initialConfig,
   }) {
     this.provider = provider;
     this.signer = signer;
     this.swapAdapterAddress = swapAdapterAddress;
     this.oracleAddress = oracleAddress;
+    this.swapperAddress = String(swapperAddress || "");
     this.timer = null;
+    this.summaryTimer = null;
     this.inFlight = false;
     this.logs = [];
     this.ready = false;
@@ -26,6 +29,61 @@ class SwapRunnerService {
       baseNotionalUsdc6: BigInt(initialConfig?.baseNotionalUsdc6 ?? "10000000"),
       intervalMs: Math.max(250, Number(initialConfig?.intervalMs ?? 1000)),
     };
+    this.resetAggregate();
+  }
+
+  resetAggregate() {
+    this.aggregate = {
+      startedAtMs: Date.now(),
+      samples: 0,
+      upMoves: 0,
+      downMoves: 0,
+      flatMoves: 0,
+      netMovePct: 0,
+      maxUpPct: 0,
+      maxDownPct: 0,
+      moves: [],
+    };
+  }
+
+  recordPriceMove(priceMovePct) {
+    if (!Number.isFinite(priceMovePct)) return;
+    this.aggregate.samples += 1;
+    this.aggregate.netMovePct += priceMovePct;
+    const sign = priceMovePct >= 0 ? "+" : "";
+    this.aggregate.moves.push(`${sign}${priceMovePct.toFixed(4)}%`);
+    if (priceMovePct > 0) this.aggregate.upMoves += 1;
+    else if (priceMovePct < 0) this.aggregate.downMoves += 1;
+    else this.aggregate.flatMoves += 1;
+    if (priceMovePct > this.aggregate.maxUpPct) this.aggregate.maxUpPct = priceMovePct;
+    if (priceMovePct < this.aggregate.maxDownPct) this.aggregate.maxDownPct = priceMovePct;
+  }
+
+  flushAggregate(reason = "window") {
+    const nowMs = Date.now();
+    const elapsedMs = Math.max(0, nowMs - this.aggregate.startedAtMs);
+    const elapsedSec = Math.round(elapsedMs / 1000);
+    const net = this.aggregate.netMovePct;
+    const sign = net >= 0 ? "+" : "";
+    const movesText = this.aggregate.moves.length > 0
+      ? this.aggregate.moves.join(", ")
+      : "none";
+    this.pushLog({
+      level: "info",
+      result: "runner-aggregate",
+      windowSec: elapsedSec,
+      samples: this.aggregate.samples,
+      upMoves: this.aggregate.upMoves,
+      downMoves: this.aggregate.downMoves,
+      flatMoves: this.aggregate.flatMoves,
+      netMovePct: `${sign}${net.toFixed(4)}`,
+      maxUpPct: `+${this.aggregate.maxUpPct.toFixed(4)}`,
+      maxDownPct: this.aggregate.maxDownPct.toFixed(4),
+      moves: this.aggregate.moves,
+      message: `20s aggregate: moved ${sign}${net.toFixed(4)}%, moves: ${movesText} (${this.aggregate.moves.length} moves)`,
+      reason,
+    });
+    this.resetAggregate();
   }
 
   pushLog(entry) {
@@ -68,6 +126,8 @@ class SwapRunnerService {
     this.oracle = this.oracleAddress ? new Contract(this.oracleAddress, ORACLE_ABI, this.provider) : null;
     this.usdcAddress = await this.swapAdapter.USDC();
     this.wethAddress = await this.swapAdapter.WETH();
+    this.poolAddress = await this.swapAdapter.pool();
+    this.pool = new Contract(this.poolAddress, POOL_ABI, this.provider);
 
     this.usdc = new Contract(this.usdcAddress, ERC20_ABI, this.signer);
     this.weth = new Contract(this.wethAddress, ERC20_ABI, this.signer);
@@ -108,6 +168,46 @@ class SwapRunnerService {
     return BigInt(bounded);
   }
 
+  fmtUsdc6(value) {
+    return Number(formatUnits(value, 6)).toFixed(2);
+  }
+
+  fmtEth18(value) {
+    return Number(formatUnits(value, 18)).toFixed(6);
+  }
+
+  async collectDiagnostics() {
+    const diagnostics = {
+      poolUsdc6: null,
+      poolWeth18: null,
+      runnerEthWei: null,
+      runnerUsdc6: null,
+    };
+
+    try {
+      const calls = [];
+      if (this.poolAddress) {
+        calls.push(this.usdc.balanceOf(this.poolAddress));
+        calls.push(this.weth.balanceOf(this.poolAddress));
+      } else {
+        calls.push(Promise.resolve(0n), Promise.resolve(0n));
+      }
+
+      calls.push(this.provider.getBalance(this.runnerAddress));
+      calls.push(this.usdc.balanceOf(this.runnerAddress));
+
+      const [poolUsdc6, poolWeth18, runnerEthWei, runnerUsdc6] = await Promise.all(calls);
+      diagnostics.poolUsdc6 = poolUsdc6;
+      diagnostics.poolWeth18 = poolWeth18;
+      diagnostics.runnerEthWei = runnerEthWei;
+      diagnostics.runnerUsdc6 = runnerUsdc6;
+    } catch {
+      // Keep logging resilient even if diagnostics RPC calls fail.
+    }
+
+    return diagnostics;
+  }
+
   trendStrengthMultiplier(direction) {
     const trend = this.config.trend;
     if (!trend) return 1;
@@ -146,6 +246,7 @@ class SwapRunnerService {
       const priceBefore = priceBeforeE18 ? Number(formatUnits(priceBeforeE18, 18)) : null;
       let estimatedWeth18 = 0n;
       const usdcNotional = Number(formatUnits(amountUsdc6, 6));
+      const diagnosticsBefore = await this.collectDiagnostics();
 
       let tx;
       if (!executeUp) {
@@ -211,14 +312,18 @@ class SwapRunnerService {
         priceBefore && priceAfter && Number.isFinite(priceBefore) && priceBefore > 0
           ? ((priceAfter - priceBefore) / priceBefore) * 100
           : null;
+      if (priceMovePct !== null) {
+        this.recordPriceMove(priceMovePct);
+      }
       const estimatedEth = Number(formatUnits(estimatedWeth18, 18));
+      const diagnosticsAfter = await this.collectDiagnostics();
       const moveText =
         priceMovePct === null
           ? "n/a"
           : `${priceMovePct >= 0 ? "+" : ""}${priceMovePct.toFixed(4)}%`;
       const message = executeUp
-        ? `Buying ${usdcNotional.toFixed(2)} USDC of WETH, moved price ${moveText}`
-        : `Selling ${estimatedEth.toFixed(6)} ETH for ${usdcNotional.toFixed(2)} USDC, moved price ${moveText}`;
+        ? `Buying ${usdcNotional.toFixed(2)} USDC of WETH (~${estimatedEth.toFixed(6)} ETH est), moved price ${moveText} | pool: ${this.fmtEth18(diagnosticsAfter.poolWeth18 || 0n)} WETH / ${this.fmtUsdc6(diagnosticsAfter.poolUsdc6 || 0n)} USDC | runner: ${this.fmtEth18(diagnosticsAfter.runnerEthWei || 0n)} ETH / ${this.fmtUsdc6(diagnosticsAfter.runnerUsdc6 || 0n)} USDC`
+        : `Selling ${estimatedEth.toFixed(6)} ETH for ${usdcNotional.toFixed(2)} USDC, moved price ${moveText} | pool: ${this.fmtEth18(diagnosticsAfter.poolWeth18 || 0n)} WETH / ${this.fmtUsdc6(diagnosticsAfter.poolUsdc6 || 0n)} USDC | runner: ${this.fmtEth18(diagnosticsAfter.runnerEthWei || 0n)} ETH / ${this.fmtUsdc6(diagnosticsAfter.runnerUsdc6 || 0n)} USDC`;
 
       this.pushLog({
         level: Number(receipt.status) === 1 ? "info" : "error",
@@ -237,21 +342,40 @@ class SwapRunnerService {
         notionalUsdc: usdcNotional.toFixed(2),
         estimatedWeth18: estimatedWeth18.toString(),
         estimatedEth: estimatedEth.toFixed(6),
+        tradeSizeUsdc6: amountUsdc6.toString(),
+        tradeSizeEth18: estimatedWeth18.toString(),
         priceBefore: priceBefore !== null ? priceBefore.toFixed(6) : null,
         priceAfter: priceAfter !== null ? priceAfter.toFixed(6) : null,
         priceMovePct: priceMovePct !== null ? priceMovePct.toFixed(6) : null,
+        poolAddress: this.poolAddress || null,
+        poolWeth18Before: (diagnosticsBefore.poolWeth18 || 0n).toString(),
+        poolUsdc6Before: (diagnosticsBefore.poolUsdc6 || 0n).toString(),
+        poolWeth18After: (diagnosticsAfter.poolWeth18 || 0n).toString(),
+        poolUsdc6After: (diagnosticsAfter.poolUsdc6 || 0n).toString(),
+        runnerEthWeiBefore: (diagnosticsBefore.runnerEthWei || 0n).toString(),
+        runnerUsdc6Before: (diagnosticsBefore.runnerUsdc6 || 0n).toString(),
+        runnerEthWeiAfter: (diagnosticsAfter.runnerEthWei || 0n).toString(),
+        runnerUsdc6After: (diagnosticsAfter.runnerUsdc6 || 0n).toString(),
         message,
         txHash: receipt.hash,
         txStatus: Number(receipt.status),
         result: "ok",
       });
     } catch (error) {
+      const diagnosticsFail = await this.collectDiagnostics();
       this.pushLog({
         level: "error",
         direction,
         txStage: "failed",
         notionalUsdc6: amountUsdc6.toString(),
         notionalUsdc: Number(formatUnits(amountUsdc6, 6)).toFixed(2),
+        tradeSizeUsdc6: amountUsdc6.toString(),
+        poolAddress: this.poolAddress || null,
+        poolWeth18: (diagnosticsFail.poolWeth18 || 0n).toString(),
+        poolUsdc6: (diagnosticsFail.poolUsdc6 || 0n).toString(),
+        runnerEthWei: (diagnosticsFail.runnerEthWei || 0n).toString(),
+        runnerUsdc6: (diagnosticsFail.runnerUsdc6 || 0n).toString(),
+        message: `trade ${Number(formatUnits(amountUsdc6, 6)).toFixed(2)} USDC failed | pool: ${this.fmtEth18(diagnosticsFail.poolWeth18 || 0n)} WETH / ${this.fmtUsdc6(diagnosticsFail.poolUsdc6 || 0n)} USDC | runner: ${this.fmtEth18(diagnosticsFail.runnerEthWei || 0n)} ETH / ${this.fmtUsdc6(diagnosticsFail.runnerUsdc6 || 0n)} USDC`,
         result: error?.shortMessage || error?.message || String(error),
       });
     } finally {
@@ -272,6 +396,9 @@ class SwapRunnerService {
     this.timer = setInterval(() => {
       this.tick().catch(() => {});
     }, this.config.intervalMs);
+    this.summaryTimer = setInterval(() => {
+      this.flushAggregate("interval");
+    }, 20_000);
 
     this.tick().catch(() => {});
   }
@@ -280,8 +407,11 @@ class SwapRunnerService {
     const wasEnabled = this.config.enabled;
     this.config.enabled = false;
     if (this.timer) clearInterval(this.timer);
+    if (this.summaryTimer) clearInterval(this.summaryTimer);
     this.timer = null;
+    this.summaryTimer = null;
     if (wasEnabled) {
+      this.flushAggregate("stop");
       this.pushLog({
         level: "warn",
         result: "runner-stopped",

@@ -1,9 +1,15 @@
 use crate::db::models::{Trade, TradeStatus};
-use crate::lib::utils::is_address_like;
+use crate::lib::cache::CacheService;
+use crate::lib::utils::{is_address_like, normalize_address};
 use crate::services::chain_sync::ChainSyncService;
+use crate::services::liquidation_bot::LiquidationBotService;
+use crate::services::realtime::RealtimeHub;
 use crate::services::user_service::UserService;
 use axum::{
-    extract::{Path, Query, State},
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        Path, Query, State,
+    },
     http::{header, HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
@@ -23,6 +29,9 @@ pub struct AppState {
     pub admin_username: String,
     pub admin_password: String,
     pub chain_sync: Option<Arc<ChainSyncService>>,
+    pub liquidation_bot: Option<Arc<LiquidationBotService>>,
+    pub cache: Arc<CacheService>,
+    pub realtime: Arc<RealtimeHub>,
 }
 
 #[derive(FromRow)]
@@ -44,6 +53,22 @@ struct UserRow {
     created_at: chrono::NaiveDateTime,
     #[sqlx(rename = "totalTradingVolume")]
     total_trading_volume: BigDecimal,
+}
+
+#[derive(FromRow)]
+struct Tier2ReferralRow {
+    #[sqlx(rename = "walletAddress")]
+    wallet_address: String,
+    #[sqlx(rename = "referralCode")]
+    referral_code: String,
+    #[sqlx(rename = "totalTradingVolume")]
+    total_trading_volume: BigDecimal,
+    #[sqlx(rename = "createdAt")]
+    created_at: chrono::NaiveDateTime,
+    #[sqlx(rename = "parentWalletAddress")]
+    parent_wallet_address: String,
+    #[sqlx(rename = "parentReferralCode")]
+    parent_referral_code: String,
 }
 
 #[derive(FromRow)]
@@ -94,6 +119,24 @@ struct TradeWithWalletRow {
     created_at: chrono::NaiveDateTime,
     #[sqlx(rename = "closedAt")]
     closed_at: Option<chrono::NaiveDateTime>,
+    #[sqlx(rename = "openTxHash")]
+    open_tx_hash: Option<String>,
+    #[sqlx(rename = "openBlockNumber")]
+    open_block_number: Option<i64>,
+    #[sqlx(rename = "closeTxHash")]
+    close_tx_hash: Option<String>,
+    #[sqlx(rename = "closeBlockNumber")]
+    close_block_number: Option<i64>,
+    #[sqlx(rename = "closeReason")]
+    close_reason: Option<String>,
+    #[sqlx(rename = "payoutUsdc")]
+    payout_usdc: Option<BigDecimal>,
+    #[sqlx(rename = "settlementAction")]
+    settlement_action: Option<String>,
+    #[sqlx(rename = "settlementUsdcAmount")]
+    settlement_usdc_amount: Option<BigDecimal>,
+    #[sqlx(rename = "settlementWethAmount")]
+    settlement_weth_amount: Option<BigDecimal>,
     #[sqlx(rename = "walletAddress")]
     wallet_address: String,
     #[sqlx(rename = "referralCode")]
@@ -134,6 +177,15 @@ fn trade_to_json(t: &Trade) -> Value {
         "pnl": t.pnl.as_ref().map(|v| v.to_string()),
         "createdAt": t.created_at,
         "closedAt": t.closed_at,
+        "openTxHash": t.open_tx_hash,
+        "openBlockNumber": t.open_block_number,
+        "closeTxHash": t.close_tx_hash,
+        "closeBlockNumber": t.close_block_number,
+        "closeReason": t.close_reason,
+        "payoutUsdc": t.payout_usdc.as_ref().map(|v| v.to_string()),
+        "settlementAction": t.settlement_action,
+        "settlementUsdcAmount": t.settlement_usdc_amount.as_ref().map(|v| v.to_string()),
+        "settlementWethAmount": t.settlement_weth_amount.as_ref().map(|v| v.to_string()),
     })
 }
 
@@ -159,6 +211,15 @@ fn trade_with_wallet_to_json(t: &TradeWithWalletRow) -> Value {
         "pnl": t.pnl.as_ref().map(|v| v.to_string()),
         "createdAt": t.created_at,
         "closedAt": t.closed_at,
+        "openTxHash": t.open_tx_hash,
+        "openBlockNumber": t.open_block_number,
+        "closeTxHash": t.close_tx_hash,
+        "closeBlockNumber": t.close_block_number,
+        "closeReason": t.close_reason,
+        "payoutUsdc": t.payout_usdc.as_ref().map(|v| v.to_string()),
+        "settlementAction": t.settlement_action,
+        "settlementUsdcAmount": t.settlement_usdc_amount.as_ref().map(|v| v.to_string()),
+        "settlementWethAmount": t.settlement_weth_amount.as_ref().map(|v| v.to_string()),
         "user": {
             "id": t.user_id,
             "walletAddress": t.wallet_address,
@@ -249,6 +310,16 @@ async fn latest_price(pool: &PgPool) -> Option<LatestPriceRow> {
     .flatten()
 }
 
+async fn latest_price_cached(state: &AppState) -> Value {
+    if let Ok(Some(v)) = state.cache.get_json("price:latest").await {
+        return v;
+    }
+    let db_latest = latest_price(&state.pool).await;
+    let as_json = latest_price_json(db_latest);
+    let _ = state.cache.set_json("price:latest", &as_json, Some(5)).await;
+    as_json
+}
+
 async fn collect_trade_stats(pool: &PgPool) -> TradeStatsRow {
     sqlx::query_as::<_, TradeStatsRow>(
         r#"
@@ -280,12 +351,12 @@ async fn collect_trade_stats(pool: &PgPool) -> TradeStatsRow {
 
 // GET /api/health
 async fn health(State(s): State<Arc<AppState>>) -> impl IntoResponse {
-    let latest = latest_price(&s.pool).await;
+    let latest = latest_price_cached(&s).await;
 
     Json(json!({
         "ok": true,
         "protocolVariant": "default",
-        "latestPrice": latest_price_json(latest),
+        "latestPrice": latest,
         "services": { "liquidationBot": true }
     }))
 }
@@ -329,9 +400,126 @@ async fn get_user(State(s): State<Arc<AppState>>, Path(wallet): Path<String>) ->
     }
 }
 
+// GET /api/users/:wallet/referrals
+async fn get_user_referrals(State(s): State<Arc<AppState>>, Path(wallet): Path<String>) -> impl IntoResponse {
+    if !is_address_like(&wallet) {
+        return api_err(StatusCode::BAD_REQUEST, "invalid wallet").into_response();
+    }
+
+    let normalized = match normalize_address(&wallet) {
+        Ok(value) => value,
+        Err(e) => return api_err(StatusCode::BAD_REQUEST, &e.to_string()).into_response(),
+    };
+    let Some(user) = sqlx::query_as::<_, UserRow>(r#"SELECT * FROM "User" WHERE "walletAddress" = $1"#)
+        .bind(&normalized)
+        .fetch_optional(&s.pool)
+        .await
+        .unwrap_or(None) else {
+            return api_err(StatusCode::NOT_FOUND, "user not found").into_response();
+        };
+
+    let referrer: Option<UserRow> = match user.referred_by {
+        Some(referrer_id) => sqlx::query_as::<_, UserRow>(r#"SELECT * FROM "User" WHERE id = $1"#)
+            .bind(referrer_id)
+            .fetch_optional(&s.pool)
+            .await
+            .unwrap_or(None),
+        None => None,
+    };
+
+    let tier1: Vec<UserRow> = sqlx::query_as::<_, UserRow>(
+        r#"SELECT * FROM "User" WHERE "referredBy" = $1 ORDER BY "createdAt" DESC"#,
+    )
+    .bind(user.id)
+    .fetch_all(&s.pool)
+    .await
+    .unwrap_or_default();
+
+    let tier2: Vec<Tier2ReferralRow> = sqlx::query_as::<_, Tier2ReferralRow>(
+        r#"
+        SELECT
+            child."walletAddress",
+            child."referralCode",
+            child."totalTradingVolume",
+            child."createdAt",
+            parent."walletAddress" AS "parentWalletAddress",
+            parent."referralCode" AS "parentReferralCode"
+        FROM "User" child
+        JOIN "User" parent ON child."referredBy" = parent.id
+        WHERE parent."referredBy" = $1
+        ORDER BY child."createdAt" DESC
+        "#,
+    )
+    .bind(user.id)
+    .fetch_all(&s.pool)
+    .await
+    .unwrap_or_default();
+
+    let tier1_volume: BigDecimal = sqlx::query_scalar(
+        r#"SELECT COALESCE(SUM("totalTradingVolume"), 0) FROM "User" WHERE "referredBy" = $1"#,
+    )
+    .bind(user.id)
+    .fetch_one(&s.pool)
+    .await
+    .unwrap_or_else(|_| BigDecimal::from(0));
+
+    let tier2_volume: BigDecimal = sqlx::query_scalar(
+        r#"
+        SELECT COALESCE(SUM(child."totalTradingVolume"), 0)
+        FROM "User" child
+        JOIN "User" parent ON child."referredBy" = parent.id
+        WHERE parent."referredBy" = $1
+        "#,
+    )
+    .bind(user.id)
+    .fetch_one(&s.pool)
+    .await
+    .unwrap_or_else(|_| BigDecimal::from(0));
+
+    let combined_volume = &tier1_volume + &tier2_volume;
+
+    Json(json!({
+        "user": {
+            "id": user.id,
+            "walletAddress": user.wallet_address,
+            "referralCode": user.referral_code,
+            "referredBy": user.referred_by,
+            "createdAt": user.created_at,
+            "totalTradingVolume": user.total_trading_volume.to_string(),
+        },
+        "referrer": referrer.map(|u| json!({
+            "id": u.id,
+            "walletAddress": u.wallet_address,
+            "referralCode": u.referral_code,
+            "totalTradingVolume": u.total_trading_volume.to_string(),
+        })),
+        "tier1": tier1.iter().map(|u| json!({
+            "id": u.id,
+            "walletAddress": u.wallet_address,
+            "referralCode": u.referral_code,
+            "createdAt": u.created_at,
+            "totalTradingVolume": u.total_trading_volume.to_string(),
+        })).collect::<Vec<_>>(),
+        "tier2": tier2.iter().map(|u| json!({
+            "walletAddress": u.wallet_address,
+            "referralCode": u.referral_code,
+            "createdAt": u.created_at,
+            "totalTradingVolume": u.total_trading_volume.to_string(),
+            "parentWalletAddress": u.parent_wallet_address,
+            "parentReferralCode": u.parent_referral_code,
+        })).collect::<Vec<_>>(),
+        "totals": {
+            "tier1Volume": tier1_volume.to_string(),
+            "tier2Volume": tier2_volume.to_string(),
+            "combinedVolume": combined_volume.to_string(),
+        }
+    }))
+    .into_response()
+}
+
 // GET /api/price/latest
 async fn price_latest(State(s): State<Arc<AppState>>) -> impl IntoResponse {
-    Json(latest_price_json(latest_price(&s.pool).await)).into_response()
+    Json(latest_price_cached(&s).await).into_response()
 }
 
 // GET /api/price/history
@@ -348,6 +536,11 @@ async fn price_history(State(s): State<Arc<AppState>>, Query(q): Query<PriceHist
         "1d" => 86400,
         _ => 3600,
     };
+    let cache_key = format!("price:history:{range}");
+    if let Ok(Some(cached)) = s.cache.get_json(&cache_key).await {
+        return Json(cached);
+    }
+
     let now = chrono::Utc::now().naive_utc();
     let since = now - chrono::Duration::seconds(secs);
 
@@ -369,7 +562,9 @@ async fn price_history(State(s): State<Arc<AppState>>, Query(q): Query<PriceHist
         .iter()
         .map(|r| json!({ "timestamp": r.timestamp.and_utc().to_rfc3339(), "price": r.price.to_string() }))
         .collect();
-    Json(json!({ "range": range, "samples": samples }))
+    let payload = json!({ "range": range, "samples": samples });
+    let _ = s.cache.set_json(&cache_key, &payload, Some(5)).await;
+    Json(payload)
 }
 
 // GET /api/trades
@@ -392,8 +587,18 @@ async fn get_trades(State(s): State<Arc<AppState>>, Query(q): Query<TradesQuery>
             if !is_address_like(&wallet) {
                 return api_err(StatusCode::BAD_REQUEST, "invalid wallet").into_response();
             }
+            let normalized_wallet = wallet.to_lowercase();
+            let open_key = format!("user:{}:trades:open", normalized_wallet);
+            let closed_key = format!("user:{}:trades:closed_head", normalized_wallet);
+            if let (Ok(Some(open)), Ok(Some(closed))) = (
+                s.cache.get_json(&open_key).await,
+                s.cache.get_json(&closed_key).await,
+            ) {
+                return Json(json!({ "openTrades": open, "closedTrades": closed })).into_response();
+            }
+
             let uid: Option<i32> = sqlx::query_scalar(r#"SELECT id FROM "User" WHERE "walletAddress" = $1"#)
-                .bind(wallet.to_lowercase())
+                .bind(&normalized_wallet)
                 .fetch_optional(&s.pool)
                 .await
                 .unwrap_or(None);
@@ -416,6 +621,8 @@ async fn get_trades(State(s): State<Arc<AppState>>, Query(q): Query<TradesQuery>
                         .filter(|t| t.status != TradeStatus::Open)
                         .map(trade_to_json)
                         .collect();
+                    let _ = s.cache.set_json(&open_key, &json!(open), Some(5)).await;
+                    let _ = s.cache.set_json(&closed_key, &json!(closed), Some(5)).await;
                     Json(json!({ "openTrades": open, "closedTrades": closed })).into_response()
                 }
                 None => Json(json!({ "openTrades": [], "closedTrades": [] })).into_response(),
@@ -452,6 +659,125 @@ async fn trades_sync(State(s): State<Arc<AppState>>, Json(body): Json<TradesSync
     }
 }
 
+#[derive(Deserialize)]
+struct BootstrapQuery {
+    wallet: Option<String>,
+}
+
+async fn bootstrap(State(s): State<Arc<AppState>>, Query(q): Query<BootstrapQuery>) -> impl IntoResponse {
+    let Some(wallet) = q.wallet else {
+        return api_err(StatusCode::BAD_REQUEST, "wallet is required").into_response();
+    };
+    if !is_address_like(&wallet) {
+        return api_err(StatusCode::BAD_REQUEST, "invalid wallet").into_response();
+    }
+    let normalized = wallet.to_lowercase();
+
+    let latest = latest_price_cached(&s).await;
+    let open_key = format!("user:{}:trades:open", normalized);
+    let closed_key = format!("user:{}:trades:closed_head", normalized);
+    let referral_key = format!("user:{}:referral_summary", normalized);
+
+    let open_trades = s
+        .cache
+        .get_json(&open_key)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| json!([]));
+    let closed_trades = s
+        .cache
+        .get_json(&closed_key)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| json!([]));
+    let referral_summary = s
+        .cache
+        .get_json(&referral_key)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| {
+            json!({
+                "tier1Volume": "0",
+                "tier2Volume": "0",
+                "combinedVolume": "0"
+            })
+        });
+
+    Json(json!({
+        "config": {
+            "protocolVariant": "default",
+            "feeConfig": { "liquidityProvisionFeePpm": 70, "protocolFeePpm": 30, "feeScaleFactorPpm": 1000000 }
+        },
+        "latestPrice": latest,
+        "openTrades": open_trades,
+        "closedTrades": closed_trades,
+        "referralSummary": referral_summary,
+    }))
+    .into_response()
+}
+
+#[derive(Deserialize)]
+struct WsQuery {
+    wallet: Option<String>,
+}
+
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(s): State<Arc<AppState>>,
+    Query(q): Query<WsQuery>,
+) -> impl IntoResponse {
+    let wallet = q.wallet.unwrap_or_default().to_lowercase();
+    ws.on_upgrade(move |socket| handle_ws(socket, s, wallet))
+}
+
+async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>, wallet: String) {
+    let mut global_rx = state.realtime.subscribe_global();
+    let mut wallet_rx = if is_address_like(&wallet) {
+        Some(state.realtime.subscribe_wallet(&wallet).await)
+    } else {
+        None
+    };
+
+    loop {
+        tokio::select! {
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Ping(payload))) => {
+                        if socket.send(Message::Pong(payload)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(_)) => {}
+                    Some(Err(_)) => break,
+                }
+            }
+            evt = global_rx.recv() => {
+                if let Ok(raw) = evt {
+                    if socket.send(Message::Text(raw)).await.is_err() {
+                        break;
+                    }
+                }
+            }
+            evt = async {
+                match &mut wallet_rx {
+                    Some(rx) => rx.recv().await.ok(),
+                    None => None,
+                }
+            } => {
+                if let Some(raw) = evt {
+                    if socket.send(Message::Text(raw)).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
+
 // GET /api/admin/overview
 async fn admin_overview(
     State(s): State<Arc<AppState>>,
@@ -469,6 +795,8 @@ async fn admin_overview(
             t.id, t."onChainTradeId", t."userId", t.direction, t.leverage, t.margin,
             t."entryPrice", t."tpPrice", t."slPrice", t."exitPrice", t."soldWeth",
             t."boughtWeth", t.status, t.pnl, t."createdAt", t."closedAt",
+            t."openTxHash", t."openBlockNumber", t."closeTxHash", t."closeBlockNumber",
+            t."closeReason", t."payoutUsdc", t."settlementAction", t."settlementUsdcAmount", t."settlementWethAmount",
             u."walletAddress", u."referralCode"
         FROM "Trade" t
         JOIN "User" u ON u.id = t."userId"
@@ -676,6 +1004,8 @@ async fn admin_trades(
             t.id, t."onChainTradeId", t."userId", t.direction, t.leverage, t.margin,
             t."entryPrice", t."tpPrice", t."slPrice", t."exitPrice", t."soldWeth",
             t."boughtWeth", t.status, t.pnl, t."createdAt", t."closedAt",
+            t."openTxHash", t."openBlockNumber", t."closeTxHash", t."closeBlockNumber",
+            t."closeReason", t."payoutUsdc", t."settlementAction", t."settlementUsdcAmount", t."settlementWethAmount",
             u."walletAddress", u."referralCode"
         FROM "Trade" t
         JOIN "User" u ON u.id = t."userId"
@@ -730,6 +1060,8 @@ async fn admin_trade_detail(
             t.id, t."onChainTradeId", t."userId", t.direction, t.leverage, t.margin,
             t."entryPrice", t."tpPrice", t."slPrice", t."exitPrice", t."soldWeth",
             t."boughtWeth", t.status, t.pnl, t."createdAt", t."closedAt",
+            t."openTxHash", t."openBlockNumber", t."closeTxHash", t."closeBlockNumber",
+            t."closeReason", t."payoutUsdc", t."settlementAction", t."settlementUsdcAmount", t."settlementWethAmount",
             u."walletAddress", u."referralCode"
         FROM "Trade" t
         JOIN "User" u ON u.id = t."userId"
@@ -772,6 +1104,28 @@ async fn admin_stats(
     .into_response()
 }
 
+#[derive(Deserialize)]
+struct AdminBotLogsQuery {
+    limit: Option<usize>,
+}
+
+// GET /api/admin/bot/logs
+async fn admin_bot_logs(
+    State(s): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(q): Query<AdminBotLogsQuery>,
+) -> impl IntoResponse {
+    if let Err(err) = require_admin(&headers, &s) {
+        return err.into_response();
+    }
+    let Some(bot) = &s.liquidation_bot else {
+        return Json(json!({ "logs": [] })).into_response();
+    };
+    let limit = q.limit.unwrap_or(200).clamp(1, 2000);
+    let logs = bot.recent_logs(limit).await;
+    Json(json!({ "logs": logs })).into_response()
+}
+
 // POST /api/admin/protocol-config
 async fn admin_protocol_config(
     State(s): State<Arc<AppState>>,
@@ -795,6 +1149,9 @@ pub fn setup_router(
     admin_username: String,
     admin_password: String,
     chain_sync: Option<Arc<ChainSyncService>>,
+    liquidation_bot: Option<Arc<LiquidationBotService>>,
+    cache: Arc<CacheService>,
+    realtime: Arc<RealtimeHub>,
 ) -> Router {
     let state = Arc::new(AppState {
         pool,
@@ -802,12 +1159,18 @@ pub fn setup_router(
         admin_username,
         admin_password,
         chain_sync,
+        liquidation_bot,
+        cache,
+        realtime,
     });
     Router::new()
+        .route("/ws", get(ws_handler))
         .route("/api/health", get(health))
         .route("/api/config", get(config))
+        .route("/api/bootstrap", get(bootstrap))
         .route("/api/users/login", post(login))
         .route("/api/users/:wallet", get(get_user))
+        .route("/api/users/:wallet/referrals", get(get_user_referrals))
         .route("/api/price/latest", get(price_latest))
         .route("/api/price/history", get(price_history))
         .route("/api/trades", get(get_trades))
@@ -818,6 +1181,7 @@ pub fn setup_router(
         .route("/api/admin/trades", get(admin_trades))
         .route("/api/admin/trades/:id", get(admin_trade_detail))
         .route("/api/admin/stats", get(admin_stats))
+        .route("/api/admin/bot/logs", get(admin_bot_logs))
         .route("/api/admin/protocol-config", post(admin_protocol_config))
         .with_state(state)
         .layer(tower_http::cors::CorsLayer::permissive())
@@ -839,7 +1203,9 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn test_health_check(pool: PgPool) {
         let user_service = UserService::new(pool.clone());
-        let app = setup_router(pool, user_service, "admin".into(), "admin123".into(), None);
+        let cache = Arc::new(CacheService::new("redis://127.0.0.1:6379").unwrap());
+        let realtime = Arc::new(RealtimeHub::new());
+        let app = setup_router(pool, user_service, "admin".into(), "admin123".into(), None, None, cache, realtime);
 
         let req = Request::builder()
             .uri("/api/health")
@@ -853,7 +1219,9 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn test_admin_stats_requires_auth(pool: PgPool) {
         let user_service = UserService::new(pool.clone());
-        let app = setup_router(pool, user_service, "admin".into(), "admin123".into(), None);
+        let cache = Arc::new(CacheService::new("redis://127.0.0.1:6379").unwrap());
+        let realtime = Arc::new(RealtimeHub::new());
+        let app = setup_router(pool, user_service, "admin".into(), "admin123".into(), None, None, cache, realtime);
 
         let req = Request::builder()
             .uri("/api/admin/stats")
@@ -867,7 +1235,9 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn test_admin_stats_with_auth(pool: PgPool) {
         let user_service = UserService::new(pool.clone());
-        let app = setup_router(pool, user_service, "admin".into(), "admin123".into(), None);
+        let cache = Arc::new(CacheService::new("redis://127.0.0.1:6379").unwrap());
+        let realtime = Arc::new(RealtimeHub::new());
+        let app = setup_router(pool, user_service, "admin".into(), "admin123".into(), None, None, cache, realtime);
 
         let req = Request::builder()
             .uri("/api/admin/stats")

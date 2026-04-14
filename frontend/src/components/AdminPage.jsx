@@ -6,7 +6,7 @@ import { ERC20_ABI } from "../abi/erc20";
 import { apiGet } from "../lib/api";
 import PriceChart from "./PriceChart";
 
-const TABS = ["overview", "users", "trades", "stats", "liquidity", "contract"];
+const TABS = ["overview", "users", "trades", "execution", "stats", "liquidity", "contract"];
 const RANGE_OPTIONS = ["15m", "1h", "6h", "1d"];
 const RANGE_WINDOW_SECONDS = {
   "15m": 15 * 60,
@@ -14,6 +14,9 @@ const RANGE_WINDOW_SECONDS = {
   "6h": 6 * 60 * 60,
   "1d": 24 * 60 * 60,
 };
+const QUOTE_TOKEN_DECIMALS = Number(ACTIVE_NETWORK.usdcDecimals || 6);
+const BASE_TOKEN_DECIMALS = Number(ACTIVE_NETWORK.wethDecimals || 18);
+const PRICE_DECIMALS = 18;
 const CONTRACT_GROUPS = [
   { key: "core", title: "Read Core", methods: ["owner", "pendingOwner", "USDC", "WETH", "getOraclePriceE18", "marginUSDC", "feeBps", "liquidityProvisionFeePpm", "protocolFeePpm", "feeScaleFactorPpm", "protocolFeeAccruedUSDC", "protocolFeeRecipient", "leverage", "maxLeverage", "tradingIsFrozen", "nextTradeId"] },
   { key: "liquidity", title: "Read Liquidity", methods: ["name", "symbol", "totalSupply", "totalAssets", "availableWithdrawalAssets", "openNotionalUSDC", "openMarginUSDC", "openLongNotionalUSDC", "openShortNotionalUSDC", "openLongMarginUSDC", "openShortMarginUSDC", "reservedMarginUSDC", "balanceOf", "maxDeposit", "maxWithdraw", "maxRedeem", "lpProvisionWhitelist", "lpProvisionMaxAssets", "lpProvisionUsedAssets"] },
@@ -36,7 +39,7 @@ function fmtUsd6Raw(value, digits = 2) {
 
 function usdc6ToNumber(value) {
   try {
-    return Number(formatUnits(BigInt(value), 6));
+    return Number(formatUnits(BigInt(value), QUOTE_TOKEN_DECIMALS));
   } catch {
     return 0;
   }
@@ -44,7 +47,7 @@ function usdc6ToNumber(value) {
 
 function e18ToNumber(value) {
   try {
-    return Number(formatUnits(BigInt(value), 18));
+    return Number(formatUnits(BigInt(value), PRICE_DECIMALS));
   } catch {
     return 0;
   }
@@ -113,8 +116,8 @@ function formatContractResult(fragment, result) {
     "convertToAssets",
   ]);
   if (typeof result === "bigint") {
-    if (usdc6Names.has(name)) return `${formatUnits(result, 6)} USDC`;
-    if (weth18Names.has(name)) return `${formatUnits(result, 18)} WETH`;
+    if (usdc6Names.has(name)) return `${formatUnits(result, QUOTE_TOKEN_DECIMALS)} USDC`;
+    if (weth18Names.has(name)) return `${formatUnits(result, BASE_TOKEN_DECIMALS)} WETH`;
   }
   return JSON.stringify(result, (_, item) => typeof item === "bigint" ? item.toString() : item, 2);
 }
@@ -138,17 +141,29 @@ function tradeRow(trade) {
   const entryPrice = e18ToNumber(trade?.entryPrice || 0);
   const exitPrice = e18ToNumber(trade?.exitPrice || 0);
   const pnl = usdc6ToNumber(trade?.pnl || 0);
+  const payout = usdc6ToNumber(trade?.payoutUsdc || 0);
+  const settlementUsdc = usdc6ToNumber(trade?.settlementUsdcAmount || 0);
+  const settlementWeth = e18ToNumber(trade?.settlementWethAmount || 0);
+  const settlementDetail = trade?.settlementAction
+    ? `${trade.settlementAction} (${fmtUsd(settlementUsdc, 2)} / ${fmt(settlementWeth, 6)} WETH)`
+    : settlement;
   return (
     <tr key={`${trade.id}-${trade.onChainTradeId}`}>
       <td className="mono">{trade.onChainTradeId}</td>
       <td className="mono">{trade.user?.walletAddress || "-"}</td>
       <td>{trade.status}</td>
+      <td>{trade.closeReason || "-"}</td>
       <td>{trade.leverage}x</td>
       <td>{fmtUsd(margin, 2)}</td>
       <td>{fmtUsd(entryPrice, 4)}</td>
       <td>{trade.exitPrice ? fmtUsd(exitPrice, 4) : "-"}</td>
       <td>{fmtUsd(pnl, 2)}</td>
-      <td className="mono">{settlement}</td>
+      <td>{fmtUsd(payout, 2)}</td>
+      <td className="mono">{trade.openBlockNumber || "-"}</td>
+      <td className="mono">{trade.closeBlockNumber || "-"}</td>
+      <td className="mono">{trade.openTxHash ? `${trade.openTxHash.slice(0, 10)}...` : "-"}</td>
+      <td className="mono">{trade.closeTxHash ? `${trade.closeTxHash.slice(0, 10)}...` : "-"}</td>
+      <td className="mono">{settlementDetail}</td>
     </tr>
   );
 }
@@ -217,10 +232,45 @@ function upsertLiveCloseTick(prevTicks, livePoint, range) {
 }
 
 function normalizePriceValue(value) {
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric)) return 0;
-  const human = numeric > 1_000_000_000 ? numeric / 1e18 : numeric;
-  return Number(human.toFixed(4));
+  if (value === null || value === undefined) return 0;
+  if (typeof value === "number") {
+    return Number.isFinite(value) && value > 0 ? value : 0;
+  }
+
+  const raw = String(value).trim();
+  if (!raw) return 0;
+
+  // Decimal strings are treated as already human-readable prices.
+  if (raw.includes(".") || raw.includes("e") || raw.includes("E")) {
+    const direct = Number(raw);
+    return Number.isFinite(direct) && direct > 0 ? direct : 0;
+  }
+
+  try {
+    const asBigInt = BigInt(raw);
+    const abs = asBigInt < 0n ? -asBigInt : asBigInt;
+
+    // Most oracle values are E18-scaled ints; plain integer prices (e.g. "2000")
+    // can exist in older rows and should not be scaled down to near-zero.
+    if (abs >= 1_000_000_000_000n) {
+      const scaled = Number(formatUnits(asBigInt, 18));
+      return Number.isFinite(scaled) && scaled > 0 ? scaled : 0;
+    }
+
+    const direct = Number(asBigInt);
+    return Number.isFinite(direct) && direct > 0 ? direct : 0;
+  } catch {
+    const fallback = Number(raw);
+    return Number.isFinite(fallback) && fallback > 0 ? fallback : 0;
+  }
+}
+
+function isReceiptLogStatus(status) {
+  return ["MINED_OK", "MINED_FAIL", "DROPPED", "RECEIPT_ERROR"].includes(String(status || "").trim().toUpperCase());
+}
+
+function isReceiptSuccessStatus(status) {
+  return String(status || "").trim().toUpperCase() === "MINED_OK";
 }
 
 export default function AdminPage() {
@@ -239,6 +289,7 @@ export default function AdminPage() {
   const [stats, setStats] = useState(null);
   const [users, setUsers] = useState([]);
   const [trades, setTrades] = useState([]);
+  const [botLogs, setBotLogs] = useState([]);
   const [selectedUser, setSelectedUser] = useState(null);
   const [walletProvider, setWalletProvider] = useState(null);
   const [walletAddress, setWalletAddress] = useState("");
@@ -274,6 +325,7 @@ export default function AdminPage() {
   const writeContract = useMemo(() => walletProvider && activeMakeitAddress ? new Contract(activeMakeitAddress, MAKEIT_ABI, walletProvider) : null, [walletProvider, activeMakeitAddress]);
   const contractFunctions = useMemo(() => activeInterface.fragments.filter((fragment) => fragment.type === "function").sort((a, b) => a.name.localeCompare(b.name)), [activeInterface]);
   const groupedContractFunctions = useMemo(() => groupContractFunctions(contractFunctions), [contractFunctions]);
+  const receiptBotLogs = useMemo(() => botLogs.filter((log) => isReceiptLogStatus(log?.status)), [botLogs]);
 
   const loadOverview = useCallback(() => apiGet("/api/admin/overview", { auth }).then(setOverview), [auth]);
   const loadStats = useCallback(() => apiGet("/api/admin/stats", { auth }).then(setStats), [auth]);
@@ -284,6 +336,10 @@ export default function AdminPage() {
     if (tradeFilter.status.trim()) params.set("status", tradeFilter.status.trim());
     return apiGet(`/api/admin/trades?${params.toString()}`, { auth }).then((data) => setTrades(data?.trades || []));
   }, [auth, tradeFilter.wallet, tradeFilter.status]);
+  const loadBotLogs = useCallback(
+    () => apiGet("/api/admin/bot/logs?limit=300", { auth }).then((data) => setBotLogs(data?.logs || [])),
+    [auth]
+  );
   const loadUserDetail = useCallback((wallet) => apiGet(`/api/admin/users/${wallet}`, { auth }).then(setSelectedUser), [auth]);
   const loadHistory = useCallback(async (selectedRange) => {
     const result = await apiGet(`/api/price/history?range=${selectedRange}`);
@@ -332,24 +388,24 @@ export default function AdminPage() {
       const reservedMarginUsdc6 = safeBigInt(reserved);
       const totalNetPoolUsdc6 = totalPoolUsdc6 > reservedMarginUsdc6 ? totalPoolUsdc6 - reservedMarginUsdc6 : 0n;
       setProtocolState({
-        priceFormatted: formatUnits(price, 18),
+        priceFormatted: formatUnits(price, PRICE_DECIMALS),
         feePct: Number(feeBps) > 0 ? Number(feeBps) / 100 : (Number(lpFee) + Number(protocolFee)) / 10000,
         liquidityProvisionFeePpm: Number(lpFee),
         protocolFeePpm: Number(protocolFee),
         feeScaleFactorPpm: Number(scale),
-        protocolFeeAccruedFormatted: formatUnits(feeBucket, 6),
+        protocolFeeAccruedFormatted: formatUnits(feeBucket, QUOTE_TOKEN_DECIMALS),
         protocolFeeRecipient: recipient,
         tradingIsFrozen: Boolean(frozen),
-        availableWithdrawalFormatted: formatUnits(available, 18),
-        reservedMarginFormatted: formatUnits(reserved, 6),
-        openLongNotionalFormatted: formatUnits(openLongNotionalUsdc6, 6),
-        openShortNotionalFormatted: formatUnits(openShortNotionalUsdc6, 6),
-        longCapacityFormatted: formatUnits(longCapacityUsdc6, 6),
-        shortCapacityFormatted: formatUnits(shortCapacityUsdc6, 6),
-        totalPoolUsdcFormatted: formatUnits(totalPoolUsdc6, 6),
-        totalNetPoolUsdcFormatted: formatUnits(totalNetPoolUsdc6, 6),
-        totalPoolWethFormatted: formatUnits(totalPoolWeth18, 18),
-        totalPoolValueUsdcFormatted: formatUnits(totalNetPoolUsdc6 + ethPoolValueUsdc6, 6),
+        availableWithdrawalFormatted: formatUnits(available, BASE_TOKEN_DECIMALS),
+        reservedMarginFormatted: formatUnits(reserved, QUOTE_TOKEN_DECIMALS),
+        openLongNotionalFormatted: formatUnits(openLongNotionalUsdc6, QUOTE_TOKEN_DECIMALS),
+        openShortNotionalFormatted: formatUnits(openShortNotionalUsdc6, QUOTE_TOKEN_DECIMALS),
+        longCapacityFormatted: formatUnits(longCapacityUsdc6, QUOTE_TOKEN_DECIMALS),
+        shortCapacityFormatted: formatUnits(shortCapacityUsdc6, QUOTE_TOKEN_DECIMALS),
+        totalPoolUsdcFormatted: formatUnits(totalPoolUsdc6, QUOTE_TOKEN_DECIMALS),
+        totalNetPoolUsdcFormatted: formatUnits(totalNetPoolUsdc6, QUOTE_TOKEN_DECIMALS),
+        totalPoolWethFormatted: formatUnits(totalPoolWeth18, BASE_TOKEN_DECIMALS),
+        totalPoolValueUsdcFormatted: formatUnits(totalNetPoolUsdc6 + ethPoolValueUsdc6, QUOTE_TOKEN_DECIMALS),
       });
     } catch {
       setProtocolState(null);
@@ -375,8 +431,8 @@ export default function AdminPage() {
   }, [walletAddress, readContract]);
 
   const refresh = useCallback(async () => {
-    await Promise.all([loadOverview(), loadStats(), loadUsers(), loadTrades(), loadProtocolState(), loadWalletInfo()]);
-  }, [loadOverview, loadStats, loadUsers, loadTrades, loadProtocolState, loadWalletInfo]);
+      await Promise.all([loadOverview(), loadStats(), loadUsers(), loadTrades(), loadBotLogs(), loadProtocolState(), loadWalletInfo()]);
+    }, [loadOverview, loadStats, loadUsers, loadTrades, loadBotLogs, loadProtocolState, loadWalletInfo]);
   const pollLatestPrice = useCallback(async () => {
     const latest = await apiGet("/api/price/latest");
     const value = normalizePriceValue(latest?.price);
@@ -448,19 +504,19 @@ export default function AdminPage() {
 
   const handleLiquidityAction = useCallback(async (action) => {
     if (!writeContract) return setError("Connect the admin wallet first.");
-    if (action === "configureWhitelist") return runWrite("Configure LP provision", () => writeContract.configureLpProvision(liquidityForm.whitelistAddress.trim(), Boolean(liquidityForm.whitelistEnabled), parseUnits(liquidityForm.whitelistMaxAssets || "0", 18)));
+    if (action === "configureWhitelist") return runWrite("Configure LP provision", () => writeContract.configureLpProvision(liquidityForm.whitelistAddress.trim(), Boolean(liquidityForm.whitelistEnabled), parseUnits(liquidityForm.whitelistMaxAssets || "0", BASE_TOKEN_DECIMALS)));
     if (action === "setFeeSplit") return runWrite("Set fee split", () => writeContract.setFeeSplitPpm(BigInt(liquidityForm.lpFeePpm || "0"), BigInt(liquidityForm.protocolFeePpm || "0")));
     if (action === "setFeeScaleFactor") return runWrite("Set fee scale factor", () => writeContract.setFeeScaleFactorPpm(BigInt(liquidityForm.feeScaleFactorPpm || "0")));
     if (action === "setRecipient") return runWrite("Set protocol fee recipient", () => writeContract.setProtocolFeeRecipient(liquidityForm.protocolFeeRecipient.trim()));
     if (action === "sweepFees") return runWrite("Sweep protocol fees", () => writeContract.sweepProtocolFees());
     if (action === "bootstrapVault") return runWrite("Bootstrap vault", () => writeContract.bootstrapVault((liquidityForm.bootstrapReceiver || walletAddress).trim()));
-    if (action === "deposit") return runWrite("Deposit WETH", () => writeContract.deposit(parseUnits(liquidityForm.depositAssets || "0", 18), walletAddress));
-    if (action === "withdraw") return runWrite("Withdraw WETH", () => writeContract.withdraw(parseUnits(liquidityForm.withdrawAssets || "0", 18), walletAddress, walletAddress));
-    if (action === "redeem") return runWrite("Redeem shares", () => writeContract.redeem(parseUnits(liquidityForm.redeemShares || "0", 18), walletAddress, walletAddress));
+    if (action === "deposit") return runWrite("Deposit WETH", () => writeContract.deposit(parseUnits(liquidityForm.depositAssets || "0", BASE_TOKEN_DECIMALS), walletAddress));
+    if (action === "withdraw") return runWrite("Withdraw WETH", () => writeContract.withdraw(parseUnits(liquidityForm.withdrawAssets || "0", BASE_TOKEN_DECIMALS), walletAddress, walletAddress));
+    if (action === "redeem") return runWrite("Redeem shares", () => writeContract.redeem(parseUnits(liquidityForm.redeemShares || "0", BASE_TOKEN_DECIMALS), walletAddress, walletAddress));
     if (action === "freezeTrading") return runWrite("Set trading freeze", () => writeContract.setTradingFrozen(Boolean(liquidityForm.freezeTrading)));
-    if (action === "rebalance") return runWrite("Swap USDC -> WETH", () => writeContract.rebalanceUsdcToEth(parseUnits(liquidityForm.rebalanceSwapUsdc || "0", 6)));
-    if (action === "fundWeth") return runWrite("Fund WETH", () => writeContract.fundETH(parseUnits(liquidityForm.fundWeth || "0", 18)));
-    if (action === "fundUsdc") return runWrite("Fund USDC", () => writeContract.fundStable(parseUnits(liquidityForm.fundUsdc || "0", 6)));
+    if (action === "rebalance") return runWrite("Swap USDC -> WETH", () => writeContract.rebalanceUsdcToEth(parseUnits(liquidityForm.rebalanceSwapUsdc || "0", QUOTE_TOKEN_DECIMALS)));
+    if (action === "fundWeth") return runWrite("Fund WETH", () => writeContract.fundETH(parseUnits(liquidityForm.fundWeth || "0", BASE_TOKEN_DECIMALS)));
+    if (action === "fundUsdc") return runWrite("Fund USDC", () => writeContract.fundStable(parseUnits(liquidityForm.fundUsdc || "0", QUOTE_TOKEN_DECIMALS)));
     return null;
   }, [writeContract, liquidityForm, walletAddress, runWrite]);
 
@@ -649,7 +705,7 @@ export default function AdminPage() {
                 </article>
                 <article className="card">
                   <div className="card-head"><h2>Recent Trades</h2><span>{overview?.recentTrades?.length || 0}</span></div>
-                  {!overview?.recentTrades?.length ? <p className="muted">No trades indexed yet.</p> : <div className="table-wrap"><table><thead><tr><th>ID</th><th>User</th><th>Status</th><th>Lev</th><th>Margin</th><th>Entry</th><th>Exit</th><th>PnL</th><th>Settlement ETH</th></tr></thead><tbody>{overview.recentTrades.map(tradeRow)}</tbody></table></div>}
+                  {!overview?.recentTrades?.length ? <p className="muted">No trades indexed yet.</p> : <div className="table-wrap"><table><thead><tr><th>ID</th><th>User</th><th>Status</th><th>Close Reason</th><th>Lev</th><th>Margin</th><th>Entry</th><th>Exit</th><th>PnL</th><th>Payout</th><th>Open Block</th><th>Close Block</th><th>Open Tx</th><th>Close Tx</th><th>Settlement</th></tr></thead><tbody>{overview.recentTrades.map(tradeRow)}</tbody></table></div>}
                 </article>
               </section>
             </>
@@ -692,7 +748,52 @@ export default function AdminPage() {
                 <label>Status<select value={tradeFilter.status} onChange={(e) => setTradeFilter((prev) => ({ ...prev, status: e.target.value }))}><option value="">all</option><option value="OPEN">OPEN</option><option value="CLOSED">CLOSED</option><option value="LIQUIDATED">LIQUIDATED</option></select></label>
               </div>
               <div className="actions" style={{ marginTop: "0.75rem" }}><button className="btn solid" onClick={() => loadTrades().catch((err) => setError(err?.message || "Failed to load trades"))}>Apply Filters</button><button className="btn ghost" onClick={() => { setTradeFilter({ wallet: "", status: "" }); setTimeout(() => loadTrades().catch(() => {}), 0); }}>Reset</button></div>
-              {!trades.length ? <p className="muted">No trades found.</p> : <div className="table-wrap"><table><thead><tr><th>ID</th><th>User</th><th>Status</th><th>Lev</th><th>Margin</th><th>Entry</th><th>Exit</th><th>PnL</th><th>Settlement ETH</th></tr></thead><tbody>{trades.map(tradeRow)}</tbody></table></div>}
+              {!trades.length ? <p className="muted">No trades found.</p> : <div className="table-wrap"><table><thead><tr><th>ID</th><th>User</th><th>Status</th><th>Close Reason</th><th>Lev</th><th>Margin</th><th>Entry</th><th>Exit</th><th>PnL</th><th>Payout</th><th>Open Block</th><th>Close Block</th><th>Open Tx</th><th>Close Tx</th><th>Settlement</th></tr></thead><tbody>{trades.map(tradeRow)}</tbody></table></div>}
+            </section>
+          ) : null}
+
+          {selectedTab === "execution" ? (
+            <section className="card">
+              <div className="card-head"><h2>Liquidation Bot Receipts</h2><span>{receiptBotLogs.length}</span></div>
+              <div className="actions" style={{ marginBottom: "0.75rem" }}>
+                <button className="btn ghost" onClick={() => loadBotLogs().catch((err) => setError(err?.message || "Failed to load bot logs"))}>Refresh Logs</button>
+              </div>
+              {!receiptBotLogs.length ? (
+                <p className="muted">No liquidation receipts yet.</p>
+              ) : (
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Time</th>
+                        <th>Trade</th>
+                        <th>Attempt</th>
+                        <th>Status</th>
+                        <th>Target Liquidation Price</th>
+                        <th>Price At Fire</th>
+                        <th>Nonce</th>
+                        <th>Tx Hash</th>
+                        <th>Error</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {receiptBotLogs.map((log, idx) => (
+                        <tr key={`${log.ts}-${log.tradeId}-${idx}`} className={isReceiptSuccessStatus(log.status) ? "bot-log-success" : "bot-log-fail"}>
+                          <td>{log.ts ? new Date(log.ts).toLocaleString() : "-"}</td>
+                          <td className="mono">{log.tradeId}</td>
+                          <td>{log.attempt}</td>
+                          <td className={isReceiptSuccessStatus(log.status) ? "success" : "danger"}>{log.status || "-"}</td>
+                          <td>{fmt(normalizePriceValue(log.targetPrice || 0), 4)}</td>
+                          <td>{fmt(normalizePriceValue(log.priceAtFire || 0), 4)}</td>
+                          <td className="mono">{log.nonce || "-"}</td>
+                          <td className="mono">{log.txHash ? `${log.txHash.slice(0, 10)}...` : "-"}</td>
+                          <td className="mono">{log.error || "-"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </section>
           ) : null}
 
@@ -719,12 +820,12 @@ export default function AdminPage() {
                 <div className="card-head"><h2>Wallet LP Stats</h2></div>
                 {!walletAddress ? <p className="muted">Connect the admin wallet to see per-wallet vault stats.</p> : <div className="stats">
                   <div><span>Whitelisted</span><strong>{walletInfo?.whitelisted ? "Yes" : "No"}</strong></div>
-                  <div><span>Share Balance</span><strong>{fmt(Number(formatUnits(walletInfo?.shareBalance || 0n, 18)), 6)} mLP</strong></div>
-                  <div><span>Quota Max</span><strong>{fmt(Number(formatUnits(walletInfo?.maxAssets || 0n, 18)), 6)} WETH</strong></div>
-                  <div><span>Quota Used</span><strong>{fmt(Number(formatUnits(walletInfo?.usedAssets || 0n, 18)), 6)} WETH</strong></div>
-                  <div><span>Max Deposit</span><strong>{fmt(Number(formatUnits(walletInfo?.maxDeposit || 0n, 18)), 6)} WETH</strong></div>
-                  <div><span>Max Withdraw</span><strong>{fmt(Number(formatUnits(walletInfo?.maxWithdraw || 0n, 18)), 6)} WETH</strong></div>
-                  <div><span>Max Redeem</span><strong>{fmt(Number(formatUnits(walletInfo?.maxRedeem || 0n, 18)), 6)} mLP</strong></div>
+                  <div><span>Share Balance</span><strong>{fmt(Number(formatUnits(walletInfo?.shareBalance || 0n, BASE_TOKEN_DECIMALS)), 6)} mLP</strong></div>
+                  <div><span>Quota Max</span><strong>{fmt(Number(formatUnits(walletInfo?.maxAssets || 0n, BASE_TOKEN_DECIMALS)), 6)} WETH</strong></div>
+                  <div><span>Quota Used</span><strong>{fmt(Number(formatUnits(walletInfo?.usedAssets || 0n, BASE_TOKEN_DECIMALS)), 6)} WETH</strong></div>
+                  <div><span>Max Deposit</span><strong>{fmt(Number(formatUnits(walletInfo?.maxDeposit || 0n, BASE_TOKEN_DECIMALS)), 6)} WETH</strong></div>
+                  <div><span>Max Withdraw</span><strong>{fmt(Number(formatUnits(walletInfo?.maxWithdraw || 0n, BASE_TOKEN_DECIMALS)), 6)} WETH</strong></div>
+                  <div><span>Max Redeem</span><strong>{fmt(Number(formatUnits(walletInfo?.maxRedeem || 0n, BASE_TOKEN_DECIMALS)), 6)} mLP</strong></div>
                 </div>}
               </article>
               <article className="card">
@@ -741,7 +842,7 @@ export default function AdminPage() {
                   <div className="actions" style={{ alignSelf: "end" }}><button className="btn ghost" disabled={txBusy} onClick={() => handleLiquidityAction("setFeeScaleFactor")}>Set Scale Factor</button></div>
                   <label>Protocol Fee Recipient<input value={liquidityForm.protocolFeeRecipient} onChange={(e) => setLiquidityForm((prev) => ({ ...prev, protocolFeeRecipient: e.target.value }))} placeholder="0x..." /></label>
                   <div className="actions" style={{ alignSelf: "end" }}><button className="btn ghost" disabled={txBusy} onClick={() => handleLiquidityAction("setRecipient")}>Set Recipient</button><button className="btn ghost" disabled={txBusy} onClick={() => handleLiquidityAction("sweepFees")}>Sweep Fees</button></div>
-                  <div className="actions" style={{ gridColumn: "1 / -1" }}><button className="btn ghost" disabled={txBusy} onClick={() => approveToken(ACTIVE_NETWORK.weth, parseUnits("1000000", 18), "Approve WETH Max")}>Approve WETH Max</button><button className="btn ghost" disabled={txBusy} onClick={() => approveToken(ACTIVE_NETWORK.usdc, parseUnits("1000000", 6), "Approve USDC Max")}>Approve USDC Max</button></div>
+                  <div className="actions" style={{ gridColumn: "1 / -1" }}><button className="btn ghost" disabled={txBusy} onClick={() => approveToken(ACTIVE_NETWORK.weth, parseUnits("1000000", BASE_TOKEN_DECIMALS), "Approve WETH Max")}>Approve WETH Max</button><button className="btn ghost" disabled={txBusy} onClick={() => approveToken(ACTIVE_NETWORK.usdc, parseUnits("1000000", QUOTE_TOKEN_DECIMALS), "Approve USDC Max")}>Approve USDC Max</button></div>
                   <label>Bootstrap Receiver<input value={liquidityForm.bootstrapReceiver} onChange={(e) => setLiquidityForm((prev) => ({ ...prev, bootstrapReceiver: e.target.value }))} placeholder="0x..." /></label>
                   <div className="actions" style={{ alignSelf: "end" }}><button className="btn ghost" disabled={txBusy} onClick={() => handleLiquidityAction("bootstrapVault")}>Bootstrap Vault</button></div>
                   <label>Deposit WETH<input value={liquidityForm.depositAssets} onChange={(e) => setLiquidityForm((prev) => ({ ...prev, depositAssets: e.target.value }))} /></label>

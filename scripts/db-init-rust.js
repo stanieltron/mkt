@@ -2,21 +2,22 @@
 /**
  * db-init-rust.js
  * Initializes the Postgres database from scratch for the Rust backend.
- * - Drops & recreates the public schema (removes all Prisma or stale state)
- * - Applies backend/migrations/20260401000000_init.sql directly via pg
+ * - Drops & recreates the public schema in --fresh mode
+ * - Applies all backend/migrations/*.sql files in lexical order
+ * - Tracks applied files in "_ScriptMigration" to support incremental runs
  *
  * Usage: node scripts/db-init-rust.js [--fresh]
  */
 
 const { Client } = require("pg");
-const { readFileSync } = require("node:fs");
+const { readFileSync, readdirSync } = require("node:fs");
 const { resolve } = require("node:path");
 const net = require("node:net");
 
 const freshMode = process.argv.includes("--fresh") || process.env.DB_FRESH === "1";
 const root = process.cwd();
 
-const migrationFile = resolve(root, "backend", "migrations", "20260401000000_init.sql");
+const migrationsDir = resolve(root, "backend", "migrations");
 
 const postgresHost = process.env.POSTGRES_HOST || process.env.PGHOST || "127.0.0.1";
 const postgresPort = Number(process.env.POSTGRES_PORT || process.env.PGPORT || "5434");
@@ -83,19 +84,38 @@ async function main() {
       console.log("[db-init-rust] schema wiped.");
     }
 
-    // Check if tables already exist (idempotent when not fresh)
-    const check = await client.query(
-      `SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='User'`
-    );
-    if (Number(check.rows[0].count) > 0 && !freshMode) {
-      console.log('[db-init-rust] schema already initialized, skipping migration (use --fresh to reset).');
-      return;
-    }
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS "_ScriptMigration" (
+        id SERIAL PRIMARY KEY,
+        "fileName" VARCHAR(255) NOT NULL UNIQUE,
+        "appliedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
 
-    console.log(`[db-init-rust] applying migration: ${migrationFile}`);
-    const sql = readFileSync(migrationFile, "utf8");
-    await client.query(sql);
-    console.log("[db-init-rust] migration applied successfully.");
+    const migrationFiles = readdirSync(migrationsDir)
+      .filter((name) => name.endsWith(".sql"))
+      .sort((a, b) => a.localeCompare(b));
+
+    for (const fileName of migrationFiles) {
+      const alreadyApplied = await client.query(
+        `SELECT 1 FROM "_ScriptMigration" WHERE "fileName" = $1 LIMIT 1`,
+        [fileName]
+      );
+      if (alreadyApplied.rowCount > 0) {
+        console.log(`[db-init-rust] migration already applied: ${fileName}`);
+        continue;
+      }
+
+      const migrationFile = resolve(migrationsDir, fileName);
+      console.log(`[db-init-rust] applying migration: ${migrationFile}`);
+      const sql = readFileSync(migrationFile, "utf8");
+      await client.query(sql);
+      await client.query(
+        `INSERT INTO "_ScriptMigration" ("fileName") VALUES ($1)`,
+        [fileName]
+      );
+      console.log(`[db-init-rust] migration applied: ${fileName}`);
+    }
 
     const seedPrice = (initialPriceUsdc6PerWeth * 1000000000000n).toString();
     const totalSeconds = Math.max(seedHistoryStepSeconds, Math.floor(seedHistoryHours * 3600));

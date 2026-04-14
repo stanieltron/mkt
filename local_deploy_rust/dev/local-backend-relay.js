@@ -13,12 +13,13 @@ const upstreamPort = Number(process.env.LOCAL_BACKEND_UPSTREAM_PORT || 8788);
 const upstreamBase = new URL(process.env.LOCAL_BACKEND_UPSTREAM_URL || `http://127.0.0.1:${upstreamPort}`);
 const rpcUrl = process.env.RPC_URL || "http://127.0.0.1:8545";
 const faucetAddress = process.env.FAUCET_ADDRESS || "";
-const faucetPrivateKey = process.env.FAUCET_PRIVATE_KEY || process.env.RUNNER_PRIVATE_KEY || "";
+const faucetPrivateKey = process.env.FAUCET_PRIVATE_KEY || "";
 const runnerPrivateKey = process.env.RUNNER_PRIVATE_KEY || "";
 const adminUsername = process.env.ADMIN_USERNAME || "admin";
 const adminPassword = process.env.ADMIN_PASSWORD || "admin123";
 const swapAdapterAddress = process.env.SWAP_ADAPTER_ADDRESS || "";
 const oracleAddress = process.env.ORACLE_ADDRESS || "";
+const swapperAddress = process.env.SWAPPER_ADDRESS || "";
 const artifactPath = resolve(process.cwd(), "local_deploy_rust", "out", "LocalFaucet.sol", "LocalFaucet.json");
 const artifact = JSON.parse(readFileSync(artifactPath, "utf8"));
 
@@ -31,7 +32,7 @@ const faucetInfo = {
 };
 
 const provider = new JsonRpcProvider(rpcUrl);
-const signer = faucetInfo.enabled ? new Wallet(faucetPrivateKey, provider) : null;
+const signer = faucetInfo.enabled ? new NonceManager(new Wallet(faucetPrivateKey, provider)) : null;
 const faucet = faucetInfo.enabled ? new Contract(faucetAddress, artifact.abi, signer) : null;
 const runnerSigner = runnerPrivateKey ? new NonceManager(new Wallet(runnerPrivateKey, provider)) : null;
 const swapRunner = new SwapRunnerService({
@@ -39,6 +40,7 @@ const swapRunner = new SwapRunnerService({
   signer: runnerSigner,
   swapAdapterAddress,
   oracleAddress,
+  swapperAddress,
   initialConfig: {
     enabled: String(process.env.SWAP_RUNNER_ENABLED || "false").toLowerCase() === "true",
     intervalMs: Number(process.env.SWAP_RUNNER_INTERVAL_MS || 1000),
@@ -179,8 +181,24 @@ async function handleFaucetClaim(req, res) {
   }
 
   try {
-    const tx = await faucet.claimTo(walletAddress);
-    const receipt = await tx.wait();
+    let tx;
+    let receipt;
+    try {
+      tx = await faucet.claimTo(walletAddress);
+      receipt = await tx.wait();
+    } catch (firstError) {
+      // Retry once for transient nonce races on local dev traffic bursts.
+      const text = String(firstError?.shortMessage || firstError?.message || firstError || "");
+      if (
+        text.toLowerCase().includes("nonce has already been used") ||
+        text.toLowerCase().includes("already known")
+      ) {
+        tx = await faucet.claimTo(walletAddress);
+        receipt = await tx.wait();
+      } else {
+        throw firstError;
+      }
+    }
     json(res, 200, {
       ok: true,
       txHash: tx.hash,
@@ -250,6 +268,70 @@ async function proxyRequest(req, res) {
   proxyReq.end();
 }
 
+function writeUpgradeResponse(socket, statusCode, statusMessage, headers = {}) {
+  const lines = [`HTTP/1.1 ${statusCode} ${statusMessage}`];
+  for (const [key, value] of Object.entries(headers)) {
+    if (value === undefined || value === null) continue;
+    if (Array.isArray(value)) {
+      for (const entry of value) lines.push(`${key}: ${entry}`);
+      continue;
+    }
+    lines.push(`${key}: ${value}`);
+  }
+  lines.push("", "");
+  socket.write(lines.join("\r\n"));
+}
+
+function proxyWebSocket(req, socket, head) {
+  const upstreamUrl = new URL(req.url || "/", upstreamBase);
+  const client = upstreamUrl.protocol === "https:" ? https : http;
+  const proxyReq = client.request(upstreamUrl, {
+    method: req.method || "GET",
+    headers: {
+      ...req.headers,
+      host: upstreamUrl.host,
+      connection: "Upgrade",
+      upgrade: req.headers.upgrade || "websocket",
+    },
+  });
+
+  proxyReq.on("upgrade", (proxyRes, proxySocket, proxyHead) => {
+    writeUpgradeResponse(
+      socket,
+      proxyRes.statusCode || 101,
+      proxyRes.statusMessage || "Switching Protocols",
+      proxyRes.headers
+    );
+    if (proxyHead && proxyHead.length > 0) {
+      socket.write(proxyHead);
+    }
+    if (head && head.length > 0) {
+      proxySocket.write(head);
+    }
+    socket.pipe(proxySocket);
+    proxySocket.pipe(socket);
+  });
+
+  proxyReq.on("response", (proxyRes) => {
+    writeUpgradeResponse(
+      socket,
+      proxyRes.statusCode || 502,
+      proxyRes.statusMessage || "Bad Gateway",
+      proxyRes.headers
+    );
+    socket.destroy();
+  });
+
+  proxyReq.on("error", () => {
+    try {
+      writeUpgradeResponse(socket, 502, "Bad Gateway", { "content-type": "text/plain" });
+    } catch {}
+    socket.destroy();
+  });
+
+  proxyReq.end();
+}
+
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url || "/", `http://127.0.0.1:${publicPort}`);
@@ -292,6 +374,10 @@ const server = http.createServer(async (req, res) => {
   } catch (error) {
     json(res, 500, { error: String(error?.message || error || "Relay failure") });
   }
+});
+
+server.on("upgrade", (req, socket, head) => {
+  proxyWebSocket(req, socket, head);
 });
 
 server.listen(publicPort, "127.0.0.1", () => {
