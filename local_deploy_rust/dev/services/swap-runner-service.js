@@ -101,6 +101,19 @@ class SwapRunnerService {
     if (this.logs.length > 200) this.logs.length = 200;
 
     const level = payload.level || "info";
+    const noisyInfoResults = new Set([
+      "runner-tx-start-buy",
+      "runner-tx-start-sell",
+      "runner-tx-submitted",
+      "runner-tx-confirmed",
+      "ok",
+    ]);
+    const shouldPrint =
+      level === "error" ||
+      level === "warn" ||
+      (level === "info" && !noisyInfoResults.has(String(payload.result || "")));
+
+    if (!shouldPrint) return;
     const line = [
       `[runner]`,
       payload.at,

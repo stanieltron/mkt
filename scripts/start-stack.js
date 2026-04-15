@@ -29,6 +29,8 @@ const backendBin = resolve(
 );
 const faucetOverlayPath = resolve(root, "local_deploy_rust", "dev", "faucet-overlay.js");
 const adminOverlayPath = resolve(root, "local_deploy_rust", "dev", "admin-runner-overlay.js");
+const startupAdminUser = process.env.ADMIN_USERNAME || "admin";
+const startupAdminPass = process.env.ADMIN_PASSWORD || "admin123";
 
 let overlayInjectionHtml = "";
 if (localMode && existsSync(faucetOverlayPath) && existsSync(adminOverlayPath)) {
@@ -189,6 +191,133 @@ function proxyHttp(req, res) {
   return proxyHttpToBase(req, res, backendBase, req.url || "/");
 }
 
+function basicAuthHeader(user, pass) {
+  return `Basic ${Buffer.from(`${user}:${pass}`, "utf8").toString("base64")}`;
+}
+
+function requestJson(targetUrl, { method = "GET", headers = {}, body } = {}) {
+  const urlObj = new URL(targetUrl);
+  const client = urlObj.protocol === "https:" ? https : http;
+  const payload = body ? JSON.stringify(body) : null;
+  const reqHeaders = {
+    ...headers,
+  };
+  if (payload && !reqHeaders["content-type"]) {
+    reqHeaders["content-type"] = "application/json";
+  }
+  if (payload && !reqHeaders["content-length"]) {
+    reqHeaders["content-length"] = Buffer.byteLength(payload);
+  }
+
+  return new Promise((resolvePromise, reject) => {
+    const req = client.request(
+      urlObj,
+      {
+        method,
+        headers: reqHeaders,
+      },
+      (res) => {
+        let raw = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk) => (raw += chunk));
+        res.on("end", () => {
+          const status = Number(res.statusCode || 0);
+          let parsed = null;
+          try {
+            parsed = raw ? JSON.parse(raw) : {};
+          } catch {
+            parsed = { raw };
+          }
+          if (status < 200 || status >= 300) {
+            reject(new Error(`HTTP ${status} ${res.statusMessage || ""} ${raw}`.trim()));
+            return;
+          }
+          resolvePromise(parsed);
+        });
+      }
+    );
+    req.on("error", reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+async function waitForServiceCheck(label, checkFn, attempts = 20, delayMs = 500) {
+  let lastError = null;
+  for (let i = 0; i < attempts; i += 1) {
+    try {
+      const result = await checkFn();
+      return { ok: true, label, result };
+    } catch (error) {
+      lastError = error;
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+  return {
+    ok: false,
+    label,
+    error: String(lastError?.message || lastError || "unknown error"),
+  };
+}
+
+async function runStartupDiagnostics() {
+  const gatewayBase = `http://127.0.0.1:${publicPort}`;
+  const checks = [];
+
+  checks.push(
+    await waitForServiceCheck("backend-health", async () => {
+      const json = await requestJson(`${gatewayBase}/api/health`);
+      const liquid = Boolean(json?.services?.liquidationBot);
+      return {
+        url: `${gatewayBase}/api/health`,
+        ok: Boolean(json?.ok),
+        liquidationBot: liquid,
+      };
+    })
+  );
+
+  if (localMode) {
+    checks.push(
+      await waitForServiceCheck("relay-runner", async () => {
+        const json = await requestJson(`${gatewayBase}/api/admin/runner`, {
+          headers: { authorization: basicAuthHeader(startupAdminUser, startupAdminPass) },
+        });
+        return {
+          url: `${gatewayBase}/api/admin/runner`,
+          ready: Boolean(json?.ready),
+          enabled: Boolean(json?.enabled),
+          runnerAddress: json?.runnerAddress || "",
+        };
+      })
+    );
+  }
+
+  if (rpcBase) {
+    checks.push(
+      await waitForServiceCheck("rpc-upstream", async () => {
+        const json = await requestJson(`${gatewayBase}/rpc`, {
+          method: "POST",
+          body: { jsonrpc: "2.0", method: "web3_clientVersion", params: [], id: 1 },
+        });
+        return {
+          url: `${gatewayBase}/rpc`,
+          upstream: rpcBase.toString(),
+          clientVersion: json?.result || "",
+        };
+      })
+    );
+  }
+
+  console.log("[start-stack] startup checks:");
+  for (const check of checks) {
+    if (!check.ok) {
+      console.log(`  - ${check.label}: FAIL (${check.error})`);
+      continue;
+    }
+    console.log(`  - ${check.label}: OK ${JSON.stringify(check.result)}`);
+  }
+}
+
 function proxyHttpToBase(req, res, base, reqPath) {
   const upstreamUrl = new URL(reqPath || "/", base);
   const client = upstreamUrl.protocol === "https:" ? https : http;
@@ -308,4 +437,7 @@ server.listen(publicPort, "0.0.0.0", () => {
   if (localMode) {
     console.log(`[start-stack] local relay enabled on http://127.0.0.1:${relayPort}`);
   }
+  runStartupDiagnostics().catch((error) => {
+    console.log(`[start-stack] startup checks failed: ${String(error?.message || error)}`);
+  });
 });

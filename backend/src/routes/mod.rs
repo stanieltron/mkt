@@ -353,12 +353,13 @@ async fn collect_trade_stats(pool: &PgPool) -> TradeStatsRow {
 // GET /api/health
 async fn health(State(s): State<Arc<AppState>>) -> impl IntoResponse {
     let latest = latest_price_cached(&s).await;
+    let liquidation_enabled = s.liquidation_bot.is_some();
 
     Json(json!({
         "ok": true,
         "protocolVariant": "default",
         "latestPrice": latest,
-        "services": { "liquidationBot": true }
+        "services": { "liquidationBot": liquidation_enabled }
     }))
 }
 
