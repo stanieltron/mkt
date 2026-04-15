@@ -23,6 +23,13 @@ function normalizeLoopbackUrl(rawValue, fallbackValue) {
   }
 }
 
+function localRpcProxyUrl() {
+  if (typeof window !== "undefined" && window.location?.origin) {
+    return `${window.location.origin.replace(/\/$/, "")}/rpc`;
+  }
+  return "";
+}
+
 const generated = GENERATED_NETWORK || {};
 const runtimeHost =
   typeof window !== "undefined" && window.location?.hostname ? window.location.hostname : "127.0.0.1";
@@ -69,7 +76,10 @@ export const ACTIVE_NETWORK = {
   usdtDecimals,
   wethDecimals,
   pool: appEnv.UNISWAP_POOL_ADDRESS || generated.pool || "",
-  rpcUrl: normalizeLoopbackUrl(rpcRaw, rpcFallback),
+  rpcUrl:
+    String(appEnv.LOCAL_MODE || String(generated.localMode || "false")).toLowerCase() === "true"
+      ? localRpcProxyUrl() || normalizeLoopbackUrl(rpcRaw, rpcFallback)
+      : normalizeLoopbackUrl(rpcRaw, rpcFallback),
   backendUrl: normalizeLoopbackUrl(appEnv.BACKEND_URL || generated.backendUrl || "", backendFallback),
   feeConfig: {
     liquidityProvisionFeePpm: defaultLpFeePpm,
@@ -101,7 +111,11 @@ function applyRuntimeConfig(data) {
   if (data.runnerAddress) ACTIVE_NETWORK.runnerAddress = String(data.runnerAddress);
   if (data.swapperAddress) ACTIVE_NETWORK.swapperAddress = String(data.swapperAddress);
   if (data.faucetAddress) ACTIVE_NETWORK.faucetAddress = String(data.faucetAddress);
-  if (data.rpcUrl) ACTIVE_NETWORK.rpcUrl = normalizeLoopbackUrl(String(data.rpcUrl), rpcFallback);
+  if (data.localMode === true) {
+    ACTIVE_NETWORK.rpcUrl = localRpcProxyUrl() || normalizeLoopbackUrl(String(data.rpcUrl || ""), rpcFallback);
+  } else if (data.rpcUrl) {
+    ACTIVE_NETWORK.rpcUrl = normalizeLoopbackUrl(String(data.rpcUrl), rpcFallback);
+  }
 
   if (data.backendUrl) {
     ACTIVE_NETWORK.backendUrl = normalizeLoopbackUrl(String(data.backendUrl), backendFallback);

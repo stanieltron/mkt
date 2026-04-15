@@ -18,6 +18,8 @@ const relayPort = Number(process.env.BACKEND_RELAY_PORT || 8787);
 const backendBase = new URL(
   process.env.BACKEND_INTERNAL_URL || `http://127.0.0.1:${localMode ? relayPort : backendPort}`
 );
+const rpcBaseRaw = process.env.FRONTEND_RPC_URL || process.env.RPC_URL || "";
+const rpcBase = rpcBaseRaw ? new URL(rpcBaseRaw) : null;
 const backendBin = resolve(
   root,
   "backend",
@@ -184,7 +186,11 @@ function proxyWebSocket(req, socket, head) {
 }
 
 function proxyHttp(req, res) {
-  const upstreamUrl = new URL(req.url || "/", backendBase);
+  return proxyHttpToBase(req, res, backendBase, req.url || "/");
+}
+
+function proxyHttpToBase(req, res, base, reqPath) {
+  const upstreamUrl = new URL(reqPath || "/", base);
   const client = upstreamUrl.protocol === "https:" ? https : http;
 
   const proxyReq = client.request(
@@ -204,7 +210,7 @@ function proxyHttp(req, res) {
 
   proxyReq.on("error", (error) => {
     res.writeHead(502, { "content-type": "application/json; charset=utf-8" });
-    res.end(JSON.stringify({ error: `Backend proxy failed: ${String(error?.message || error)}` }));
+    res.end(JSON.stringify({ error: `Upstream proxy failed: ${String(error?.message || error)}` }));
   });
 
   req.pipe(proxyReq);
@@ -270,6 +276,13 @@ function serveSpaAsset(req, res) {
 
 const server = http.createServer((req, res) => {
   const pathname = new URL(req.url || "/", `http://127.0.0.1:${publicPort}`).pathname;
+  if ((pathname === "/rpc" || pathname.startsWith("/rpc/")) && rpcBase) {
+    const urlObj = new URL(req.url || "/rpc", `http://127.0.0.1:${publicPort}`);
+    const rpcPath = urlObj.pathname.replace(/^\/rpc/, "") || "/";
+    const rpcReqPath = `${rpcPath}${urlObj.search || ""}`;
+    proxyHttpToBase(req, res, rpcBase, rpcReqPath);
+    return;
+  }
   if (pathname.startsWith("/api/") || pathname === "/api" || pathname === "/ws") {
     proxyHttp(req, res);
     return;
@@ -289,6 +302,9 @@ server.on("upgrade", (req, socket, head) => {
 server.listen(publicPort, "0.0.0.0", () => {
   console.log(`[start-stack] frontend+gateway listening on http://0.0.0.0:${publicPort}`);
   console.log(`[start-stack] backend proxied to ${backendBase.toString()}`);
+  if (rpcBase) {
+    console.log(`[start-stack] rpc proxied at /rpc -> ${rpcBase.toString()}`);
+  }
   if (localMode) {
     console.log(`[start-stack] local relay enabled on http://127.0.0.1:${relayPort}`);
   }
