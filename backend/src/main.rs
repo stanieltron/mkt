@@ -32,6 +32,9 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("[backend] Connecting to Postgres...");
     let pool = db::connect().await?;
+    tracing::info!("[backend] Running DB migrations...");
+    sqlx::migrate!("./migrations").run(&pool).await?;
+    tracing::info!("[backend] DB migrations complete");
 
     tracing::info!("[backend] Connecting to RPC: {}", env.rpc_url);
     let provider = Arc::new(Provider::<Http>::try_from(env.rpc_url.as_str())?);
