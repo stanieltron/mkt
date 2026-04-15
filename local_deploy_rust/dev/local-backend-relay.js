@@ -119,7 +119,7 @@ function isAdminAuthorized(req) {
 
 function requireAdmin(req, res) {
   if (isAdminAuthorized(req)) return true;
-  res.writeHead(401, corsHeaders({ "content-type": "application/json; charset=utf-8", "www-authenticate": 'Basic realm="makeit-admin"' }));
+  res.writeHead(401, corsHeaders({ "content-type": "application/json; charset=utf-8" }));
   res.end(JSON.stringify({ error: "Invalid admin credentials" }));
   return false;
 }

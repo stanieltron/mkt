@@ -1,8 +1,46 @@
 const LOCAL_ADMIN_API_BASE = __LOCAL_ADMIN_API_BASE__;
 
+let configDefaults = {
+  username: "",
+  password: "",
+};
+let configLoaded = false;
+let configLoadPromise = null;
+
+function normalizeBaseUrl(base) {
+  return String(base || "").replace(/\/$/, "");
+}
+
+async function loadAdminDefaultsFromConfig() {
+  if (configLoaded) return configDefaults;
+  if (configLoadPromise) return configLoadPromise;
+
+  const base = normalizeBaseUrl(LOCAL_ADMIN_API_BASE);
+  configLoadPromise = (async () => {
+    try {
+      const response = await fetch(`${base}/api/config`, { method: "GET" });
+      if (!response.ok) {
+        configLoaded = true;
+        return configDefaults;
+      }
+      const payload = await response.json().catch(() => ({}));
+      const username = String(payload?.adminDefaultUser || "");
+      const password = String(payload?.adminDefaultPassword || "");
+      configDefaults = { username, password };
+    } catch {
+      // swallow; overlay will continue with existing localStorage values
+    } finally {
+      configLoaded = true;
+    }
+    return configDefaults;
+  })();
+
+  return configLoadPromise;
+}
+
 function adminAuthHeaders() {
-  const username = localStorage.getItem("makeit.admin.username") || "admin";
-  const password = localStorage.getItem("makeit.admin.password") || "admin123";
+  const username = configDefaults.username || "admin";
+  const password = configDefaults.password || "admin123";
   return { Authorization: `Basic ${btoa(`${username}:${password}`)}` };
 }
 
@@ -191,7 +229,13 @@ function installAdminRunnerOverlay() {
       state = await apiJson("/api/admin/runner", { method: "GET", headers: adminAuthHeaders() });
     } catch (error) {
       if (error?.status === 401) {
-        state = null;
+        // credentials may not be initialized yet; retry once after loading /api/config defaults
+        await loadAdminDefaultsFromConfig().catch(() => {});
+        try {
+          state = await apiJson("/api/admin/runner", { method: "GET", headers: adminAuthHeaders() });
+        } catch {
+          state = null;
+        }
       } else {
         statusEl.textContent = String(error?.message || error || "Runner unavailable");
       }
@@ -215,7 +259,11 @@ function installAdminRunnerOverlay() {
   startBtn.addEventListener("click", () => patchRunner({ enabled: true }).catch(() => {}));
   stopBtn.addEventListener("click", () => patchRunner({ enabled: false }).catch(() => {}));
 
-  refresh().catch(() => {});
+  loadAdminDefaultsFromConfig()
+    .catch(() => {})
+    .finally(() => {
+      refresh().catch(() => {});
+    });
   window.setInterval(() => {
     refresh().catch(() => {});
   }, 3000);
