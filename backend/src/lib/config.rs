@@ -29,7 +29,11 @@ impl Env {
         let public_mode = env::var("PUBLIC_MODE").unwrap_or_else(|_| "false".into()).parse::<bool>().unwrap_or(false);
         Ok(Self {
             port: env::var("PORT").unwrap_or_else(|_| "8787".into()).parse().unwrap_or(8787),
-            rpc_url: env::var("RPC_URL").context("RPC_URL required")?,
+            rpc_url: env::var("BACKEND_RPC_URL")
+                .ok()
+                .filter(|v| !v.is_empty())
+                .or_else(|| env::var("RPC_URL").ok().filter(|v| !v.is_empty()))
+                .context("BACKEND_RPC_URL or RPC_URL required")?,
             chain_id: env::var("CHAIN_ID").unwrap_or_else(|_| "31337".into()).parse().unwrap_or(31337),
             database_url: env::var("DATABASE_URL").context("DATABASE_URL required")?,
             makeit_address: env::var("MAKEIT_ADDRESS").context("MAKEIT_ADDRESS required")?,

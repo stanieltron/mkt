@@ -20,16 +20,20 @@ class SwapRunnerService {
     this.swapperAddress = String(swapperAddress || "");
     this.timer = null;
     this.summaryTimer = null;
+    this.autoStopTimer = null;
     this.inFlight = false;
     this.logs = [];
     this.ready = false;
+    this.startedAtMs = 0;
+    this.nextAutoStopAtMs = 0;
 
     this.config = {
       enabled: Boolean(initialConfig?.enabled),
       trend: clamp(Number(initialConfig?.trend ?? 0), -1, 1),
       volatility: clamp(Number(initialConfig?.volatility ?? 0.2), 0, 1),
       baseNotionalUsdc6: BigInt(initialConfig?.baseNotionalUsdc6 ?? "10000000"),
-      intervalMs: Math.max(250, Number(initialConfig?.intervalMs ?? 1000)),
+      intervalMs: 500,
+      maxRuntimeMs: Math.max(30_000, Number(initialConfig?.maxRuntimeMs ?? 300_000)),
     };
     this.resetAggregate();
   }
@@ -171,7 +175,7 @@ class SwapRunnerService {
 
   computeNextAmount() {
     const noise = (Math.random() * 2 - 1) * this.config.volatility;
-    const scale = 1 + noise * 0.6;
+    const scale = 1 + noise * 0.45;
     const value = Number(this.config.baseNotionalUsdc6) * scale;
     const bounded = Math.max(10_000, Math.round(value));
     return BigInt(bounded);
@@ -191,6 +195,7 @@ class SwapRunnerService {
       poolWeth18: null,
       runnerEthWei: null,
       runnerUsdc6: null,
+      runnerWeth18: null,
     };
 
     try {
@@ -204,12 +209,14 @@ class SwapRunnerService {
 
       calls.push(this.provider.getBalance(this.runnerAddress));
       calls.push(this.usdc.balanceOf(this.runnerAddress));
+      calls.push(this.weth.balanceOf(this.runnerAddress));
 
-      const [poolUsdc6, poolWeth18, runnerEthWei, runnerUsdc6] = await Promise.all(calls);
+      const [poolUsdc6, poolWeth18, runnerEthWei, runnerUsdc6, runnerWeth18] = await Promise.all(calls);
       diagnostics.poolUsdc6 = poolUsdc6;
       diagnostics.poolWeth18 = poolWeth18;
       diagnostics.runnerEthWei = runnerEthWei;
       diagnostics.runnerUsdc6 = runnerUsdc6;
+      diagnostics.runnerWeth18 = runnerWeth18;
     } catch {
       // Keep logging resilient even if diagnostics RPC calls fail.
     }
@@ -217,22 +224,41 @@ class SwapRunnerService {
     return diagnostics;
   }
 
-  trendStrengthMultiplier(direction) {
-    const trend = this.config.trend;
-    if (!trend) return 1;
-
-    const aligned =
-      (trend > 0 && direction === "UP") ||
-      (trend < 0 && direction === "DOWN");
-    if (!aligned) return 1;
-
-    return 1 + Math.abs(trend) * 99;
+  trendStrengthMultiplier() {
+    return 1 + Math.abs(this.config.trend) * 1.5;
   }
 
   shouldMoveUp() {
-    const bias = 0.5 + this.config.trend * 0.45;
-    const chance = clamp(bias, 0.05, 0.95);
+    const trend = clamp(Number(this.config.trend || 0), -1, 1);
+    const volatility = clamp(Number(this.config.volatility || 0), 0, 1);
+
+    // volatility=0 => deterministic direction by trend.
+    if (volatility <= 0.0001) {
+      if (trend > 0) return true;
+      if (trend < 0) return false;
+      return Math.random() < 0.5;
+    }
+
+    // Higher volatility increases direction flips, but trend still dominates overall.
+    const chance = clamp(0.5 + trend * (0.5 - 0.25 * volatility), 0.05, 0.95);
     return Math.random() < chance;
+  }
+
+  reverseTrendForOutOfFunds(direction, amountUsdc6, diagnostics) {
+    const previousTrend = Number(this.config.trend || 0);
+    const nextTrend = previousTrend === 0 ? (direction === "UP" ? -0.2 : 0.2) : -previousTrend;
+    this.config.trend = clamp(nextTrend, -1, 1);
+    this.pushLog({
+      level: "warn",
+      result: "runner-trend-reversed-out-of-funds",
+      previousTrend,
+      newTrend: this.config.trend,
+      direction,
+      requiredUsdc6: String(amountUsdc6 || 0n),
+      runnerUsdc6: String(diagnostics?.runnerUsdc6 || 0n),
+      runnerWeth18: String(diagnostics?.runnerWeth18 || 0n),
+      message: "Runner out of funds for current direction. Trend reversed automatically.",
+    });
   }
 
   async tick() {
@@ -246,7 +272,7 @@ class SwapRunnerService {
     amountUsdc6 = BigInt(
       Math.max(
         10_000,
-        Math.round(Number(amountUsdc6) * this.trendStrengthMultiplier(direction))
+        Math.round(Number(amountUsdc6) * this.trendStrengthMultiplier())
       )
     );
 
@@ -277,6 +303,16 @@ class SwapRunnerService {
           executeUp = true;
           direction = "UP";
         }
+      }
+
+      if (executeUp) {
+        if ((diagnosticsBefore.runnerUsdc6 || 0n) < amountUsdc6) {
+          this.reverseTrendForOutOfFunds("UP", amountUsdc6, diagnosticsBefore);
+          return;
+        }
+      } else if (estimatedWeth18 > 0n && (diagnosticsBefore.runnerWeth18 || 0n) < estimatedWeth18) {
+        this.reverseTrendForOutOfFunds("DOWN", amountUsdc6, diagnosticsBefore);
+        return;
       }
 
       this.pushLog({
@@ -372,8 +408,8 @@ class SwapRunnerService {
       });
     } catch (error) {
       const diagnosticsFail = await this.collectDiagnostics();
-      this.pushLog({
-        level: "error",
+        this.pushLog({
+          level: "error",
         direction,
         txStage: "failed",
         notionalUsdc6: amountUsdc6.toString(),
@@ -386,7 +422,15 @@ class SwapRunnerService {
         runnerUsdc6: (diagnosticsFail.runnerUsdc6 || 0n).toString(),
         message: `trade ${Number(formatUnits(amountUsdc6, 6)).toFixed(2)} USDC failed | pool: ${this.fmtEth18(diagnosticsFail.poolWeth18 || 0n)} WETH / ${this.fmtUsdc6(diagnosticsFail.poolUsdc6 || 0n)} USDC | runner: ${this.fmtEth18(diagnosticsFail.runnerEthWei || 0n)} ETH / ${this.fmtUsdc6(diagnosticsFail.runnerUsdc6 || 0n)} USDC`,
         result: error?.shortMessage || error?.message || String(error),
-      });
+        });
+      const text = String(error?.shortMessage || error?.message || error || "").toLowerCase();
+      if (
+        text.includes("insufficient") ||
+        text.includes("exceeds balance") ||
+        text.includes("transfer amount exceeds balance")
+      ) {
+        this.reverseTrendForOutOfFunds(direction, amountUsdc6, diagnosticsFail);
+      }
     } finally {
       this.inFlight = false;
     }
@@ -395,11 +439,15 @@ class SwapRunnerService {
   start() {
     if (!this.ready) return;
     if (this.timer) clearInterval(this.timer);
+    if (this.autoStopTimer) clearTimeout(this.autoStopTimer);
     this.config.enabled = true;
+    this.startedAtMs = Date.now();
+    this.nextAutoStopAtMs = this.startedAtMs + this.config.maxRuntimeMs;
     this.pushLog({
       level: "info",
       result: "runner-started",
       intervalMs: this.config.intervalMs,
+      maxRuntimeMs: this.config.maxRuntimeMs,
     });
 
     this.timer = setInterval(() => {
@@ -408,6 +456,15 @@ class SwapRunnerService {
     this.summaryTimer = setInterval(() => {
       this.flushAggregate("interval");
     }, 20_000);
+    this.autoStopTimer = setTimeout(() => {
+      this.pushLog({
+        level: "warn",
+        result: "runner-auto-stopped",
+        message: "Runner auto-stopped after max runtime window.",
+        maxRuntimeMs: this.config.maxRuntimeMs,
+      });
+      this.stop();
+    }, this.config.maxRuntimeMs);
 
     this.tick().catch(() => {});
   }
@@ -417,8 +474,11 @@ class SwapRunnerService {
     this.config.enabled = false;
     if (this.timer) clearInterval(this.timer);
     if (this.summaryTimer) clearInterval(this.summaryTimer);
+    if (this.autoStopTimer) clearTimeout(this.autoStopTimer);
     this.timer = null;
     this.summaryTimer = null;
+    this.autoStopTimer = null;
+    this.nextAutoStopAtMs = 0;
     if (wasEnabled) {
       this.flushAggregate("stop");
       this.pushLog({
@@ -445,8 +505,9 @@ class SwapRunnerService {
       const value = BigInt(next.baseNotionalUsdc6);
       this.config.baseNotionalUsdc6 = value > 0n ? value : 1n;
     }
-    if (next.intervalMs !== undefined) {
-      this.config.intervalMs = Math.max(250, Number(next.intervalMs));
+    this.config.intervalMs = 500;
+    if (next.maxRuntimeMs !== undefined) {
+      this.config.maxRuntimeMs = Math.max(30_000, Number(next.maxRuntimeMs));
     }
 
     if (this.config.enabled && !wasEnabled) {
@@ -463,18 +524,35 @@ class SwapRunnerService {
         result: "runner-interval-updated",
         intervalMs: this.config.intervalMs,
       });
+      if (this.autoStopTimer) {
+        clearTimeout(this.autoStopTimer);
+        const msLeft = Math.max(1_000, this.nextAutoStopAtMs - Date.now());
+        this.autoStopTimer = setTimeout(() => {
+          this.pushLog({
+            level: "warn",
+            result: "runner-auto-stopped",
+            message: "Runner auto-stopped after max runtime window.",
+            maxRuntimeMs: this.config.maxRuntimeMs,
+          });
+          this.stop();
+        }, msLeft);
+      }
     }
 
     return this.getState();
   }
 
   getState() {
+    const runtimeLeftMs = this.config.enabled && this.nextAutoStopAtMs > 0
+      ? Math.max(0, this.nextAutoStopAtMs - Date.now())
+      : 0;
     return {
       ...this.config,
       baseNotionalUsdc6: this.config.baseNotionalUsdc6.toString(),
       ready: this.ready,
       runnerAddress: this.runnerAddress || "",
       swapperAddress: this.swapperAddress || "",
+      runtimeLeftMs,
       logs: this.logs.slice(0, 50),
     };
   }

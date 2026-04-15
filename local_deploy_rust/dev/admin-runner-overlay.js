@@ -108,6 +108,8 @@ function installAdminRunnerOverlay() {
     .local-runner-title { margin: 0; font-size: 1.1rem; }
     .local-runner-close { background: none; border: none; color: #c9baa0; cursor: pointer; font-size: 1.2rem; margin: -0.5rem -0.5rem 0 0; padding: 0.5rem; }
     .local-runner-copy, .local-runner-status { margin: 0; font-size: 0.8rem; color: #c9baa0; word-break: break-all; }
+    .local-runner-note { margin: 0; font-size: 0.76rem; color: #b8aa92; line-height: 1.35; }
+    .local-runner-alert { margin: 0; font-size: 0.78rem; color: #ffb7a0; }
     .local-runner-grid { display: grid; gap: 0.8rem; }
     .local-runner-grid label { display: grid; gap: 0.35rem; font-size: 0.82rem; }
     .local-runner-grid input { width: 100%; }
@@ -155,6 +157,7 @@ function installAdminRunnerOverlay() {
           <button class="local-runner-close" type="button" aria-label="Close">&times;</button>
         </div>
         <p class="local-runner-copy"></p>
+        <p class="local-runner-note">Tick rate is fixed at 2 trades/sec. Volatility controls how often moves flip against trend.</p>
         <div class="local-runner-grid">
           <label>Trend <input type="range" min="-1" max="1" step="0.01" data-field="trend"></label>
           <label>Volatility <input type="range" min="0" max="1" step="0.01" data-field="volatility"></label>
@@ -164,6 +167,7 @@ function installAdminRunnerOverlay() {
           <button class="local-runner-btn" data-action="stop" type="button">Stop</button>
         </div>
         <p class="local-runner-status"></p>
+        <p class="local-runner-alert"></p>
       </div>
     </aside>
   `;
@@ -189,6 +193,7 @@ function installAdminRunnerOverlay() {
 
   const copyEl = backdrop.querySelector(".local-runner-copy");
   const statusEl = backdrop.querySelector(".local-runner-status");
+  const alertEl = backdrop.querySelector(".local-runner-alert");
   const trendEl = backdrop.querySelector('[data-field="trend"]');
   const volatilityEl = backdrop.querySelector('[data-field="volatility"]');
   const startBtn = backdrop.querySelector('[data-action="start"]');
@@ -216,12 +221,22 @@ function installAdminRunnerOverlay() {
       backdrop.hidden = true;
       return;
     }
-    copyEl.textContent = `ready=${state.ready ? "yes" : "no"} | runner=${state.runnerAddress || "-"} | base=${formatUsdc6(state.baseNotionalUsdc6)} USDC`;
+    const runtimeLeftSec = Math.max(0, Math.round(Number(state.runtimeLeftMs || 0) / 1000));
+    copyEl.textContent = `ready=${state.ready ? "yes" : "no"} | runner=${state.runnerAddress || "-"} | base=${formatUsdc6(state.baseNotionalUsdc6)} USDC | auto-stop in ${runtimeLeftSec}s`;
     trendEl.value = String(state.trend ?? 0);
     volatilityEl.value = String(state.volatility ?? 0.2);
     startBtn.disabled = busy || Boolean(state.enabled);
     stopBtn.disabled = busy || !state.enabled;
     statusEl.textContent = state.enabled ? "Runner active" : "Runner stopped";
+    const latestOutOfFunds = Array.isArray(state.logs)
+      ? state.logs.find((entry) => entry?.result === "runner-trend-reversed-out-of-funds")
+      : null;
+    if (latestOutOfFunds) {
+      const nextTrend = Number(latestOutOfFunds.newTrend || 0).toFixed(2);
+      alertEl.textContent = `Out of funds for previous direction. Trend was auto-reversed to ${nextTrend}.`;
+    } else {
+      alertEl.textContent = "";
+    }
   }
 
   async function refresh() {

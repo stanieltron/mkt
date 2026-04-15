@@ -11,7 +11,7 @@ const { SwapRunnerService } = require("./services/swap-runner-service.js");
 const publicPort = Number(process.env.BACKEND_PORT || 8787);
 const upstreamPort = Number(process.env.LOCAL_BACKEND_UPSTREAM_PORT || 8788);
 const upstreamBase = new URL(process.env.LOCAL_BACKEND_UPSTREAM_URL || `http://127.0.0.1:${upstreamPort}`);
-const rpcUrl = process.env.RPC_URL || "http://127.0.0.1:8545";
+const rpcUrl = process.env.BACKEND_RPC_URL || process.env.RPC_URL || "http://127.0.0.1:8545";
 const faucetAddress = process.env.FAUCET_ADDRESS || "";
 const faucetPrivateKey = process.env.FAUCET_PRIVATE_KEY || "";
 const runnerPrivateKey = process.env.RUNNER_PRIVATE_KEY || "";
@@ -59,10 +59,11 @@ const swapRunner = new SwapRunnerService({
   swapperAddress,
   initialConfig: {
     enabled: String(process.env.SWAP_RUNNER_ENABLED || "false").toLowerCase() === "true",
-    intervalMs: Number(process.env.SWAP_RUNNER_INTERVAL_MS || 1000),
+    intervalMs: Number(process.env.SWAP_RUNNER_INTERVAL_MS || 500),
     baseNotionalUsdc6: process.env.SWAP_RUNNER_BASE_NOTIONAL_USDC_6 || "10000000",
     trend: Number(process.env.SWAP_RUNNER_TREND || "0"),
     volatility: Number(process.env.SWAP_RUNNER_VOLATILITY || "0.2"),
+    maxRuntimeMs: Number(process.env.SWAP_RUNNER_MAX_RUNTIME_MS || "300000"),
   },
 });
 

@@ -392,7 +392,10 @@ async fn config() -> impl IntoResponse {
         "chainName": chain_name,
         "publicMode": public_mode,
         "localMode": local_mode,
-        "rpcUrl": env::var("RPC_URL").ok().filter(|v| !v.is_empty()),
+        "rpcUrl": env::var("FRONTEND_RPC_URL")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .or_else(|| env::var("RPC_URL").ok().filter(|v| !v.is_empty())),
         "backendUrl": env::var("BACKEND_URL").ok().filter(|v| !v.is_empty()),
         "makeit": env::var("MAKEIT_ADDRESS").ok().filter(|v| !v.is_empty()),
         "oracle": env::var("ORACLE_ADDRESS").ok().filter(|v| !v.is_empty()),
