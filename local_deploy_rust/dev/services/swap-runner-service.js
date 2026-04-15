@@ -238,7 +238,8 @@ class SwapRunnerService {
   }
 
   trendStrengthMultiplier() {
-    return 1 + Math.abs(this.config.trend) * 1.5;
+    // Previous max at |trend|=1 was 2.5x. New max is 25x (~10x stronger than before).
+    return 1 + Math.abs(this.config.trend) * 24;
   }
 
   shouldMoveUp() {
