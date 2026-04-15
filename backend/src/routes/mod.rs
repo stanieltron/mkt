@@ -20,6 +20,7 @@ use bigdecimal::BigDecimal;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::{FromRow, PgPool};
+use std::env;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -363,9 +364,50 @@ async fn health(State(s): State<Arc<AppState>>) -> impl IntoResponse {
 
 // GET /api/config
 async fn config() -> impl IntoResponse {
+    let chain_id = env::var("CHAIN_ID")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(31337);
+    let chain_name = env::var("CHAIN_NAME").unwrap_or_else(|_| "Anvil Local".to_string());
+    let public_mode = env::var("PUBLIC_MODE")
+        .ok()
+        .map(|v| v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let local_mode = env::var("LOCAL_MODE")
+        .ok()
+        .map(|v| v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let lp_fee_ppm = env::var("LP_FEE_PPM")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(70);
+    let protocol_fee_ppm = env::var("PROTOCOL_FEE_PPM")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(30);
+
     Json(json!({
         "protocolVariant": "default",
-        "feeConfig": { "liquidityProvisionFeePpm": 70, "protocolFeePpm": 30, "feeScaleFactorPpm": 1000000 }
+        "chainId": chain_id,
+        "chainName": chain_name,
+        "publicMode": public_mode,
+        "localMode": local_mode,
+        "rpcUrl": env::var("RPC_URL").ok().filter(|v| !v.is_empty()),
+        "backendUrl": env::var("BACKEND_URL").ok().filter(|v| !v.is_empty()),
+        "makeit": env::var("MAKEIT_ADDRESS").ok().filter(|v| !v.is_empty()),
+        "oracle": env::var("ORACLE_ADDRESS").ok().filter(|v| !v.is_empty()),
+        "swapAdapter": env::var("SWAP_ADAPTER_ADDRESS").ok().filter(|v| !v.is_empty()),
+        "pool": env::var("UNISWAP_POOL_ADDRESS").ok().filter(|v| !v.is_empty()),
+        "usdc": env::var("USDC_ADDRESS").ok().filter(|v| !v.is_empty()),
+        "usdt": env::var("USDT_ADDRESS").ok().filter(|v| !v.is_empty()),
+        "weth": env::var("WETH_ADDRESS").ok().filter(|v| !v.is_empty()),
+        "adminDefaultUser": env::var("ADMIN_USERNAME").ok().filter(|v| !v.is_empty()),
+        "adminDefaultPassword": env::var("ADMIN_PASSWORD").ok().filter(|v| !v.is_empty()),
+        "feeConfig": {
+            "liquidityProvisionFeePpm": lp_fee_ppm,
+            "protocolFeePpm": protocol_fee_ppm,
+            "feeScaleFactorPpm": 1000000
+        }
     }))
 }
 

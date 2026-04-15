@@ -24,7 +24,6 @@ function normalizeLoopbackUrl(rawValue, fallbackValue) {
 }
 
 const generated = GENERATED_NETWORK || {};
-const chainId = Number(appEnv.CHAIN_ID || generated.chainId || 31337);
 const runtimeHost =
   typeof window !== "undefined" && window.location?.hostname ? window.location.hostname : "127.0.0.1";
 const backendFallback =
@@ -43,10 +42,18 @@ const usdcDecimals = Number(appEnv.USDC_DECIMALS || generated.usdcDecimals || 6)
 const usdtDecimals = Number(appEnv.USDT_DECIMALS || generated.usdtDecimals || 6);
 const wethDecimals = Number(appEnv.WETH_DECIMALS || generated.wethDecimals || 18);
 
+function toChainHex(chainId) {
+  const n = Number(chainId || 31337);
+  return `0x${n.toString(16)}`;
+}
+
 export const ACTIVE_NETWORK = {
-  chainId,
-  chainHex: `0x${chainId.toString(16)}`,
-  chainName: appEnv.CHAIN_NAME || generated.chainName || (chainId === 31337 ? "Anvil Local" : `Chain ${chainId}`),
+  chainId: Number(appEnv.CHAIN_ID || generated.chainId || 31337),
+  chainHex: toChainHex(Number(appEnv.CHAIN_ID || generated.chainId || 31337)),
+  chainName:
+    appEnv.CHAIN_NAME ||
+    generated.chainName ||
+    (Number(appEnv.CHAIN_ID || generated.chainId || 31337) === 31337 ? "Anvil Local" : `Chain ${Number(appEnv.CHAIN_ID || generated.chainId || 31337)}`),
   updatedAt: generated.updatedAt || "",
   makeit: makeitAddress,
   protocolVariant: "default",
@@ -60,7 +67,7 @@ export const ACTIVE_NETWORK = {
   wethDecimals,
   pool: appEnv.UNISWAP_POOL_ADDRESS || generated.pool || "",
   rpcUrl: normalizeLoopbackUrl(rpcRaw, rpcFallback),
-  backendUrl: normalizeLoopbackUrl(backendRaw, backendFallback),
+  backendUrl: normalizeLoopbackUrl(appEnv.BACKEND_URL || generated.backendUrl || "", backendFallback),
   feeConfig: {
     liquidityProvisionFeePpm: defaultLpFeePpm,
     protocolFeePpm: defaultProtocolFeePpm,
@@ -73,3 +80,52 @@ export const ACTIVE_NETWORK = {
   adminDefaultUser: appEnv.ADMIN_USERNAME || generated.adminDefaultUser || "",
   adminDefaultPassword: appEnv.ADMIN_PASSWORD || generated.adminDefaultPassword || "",
 };
+
+function applyRuntimeConfig(data) {
+  if (!data || typeof data !== "object") return;
+
+  if (data.chainId != null) ACTIVE_NETWORK.chainId = Number(data.chainId);
+  ACTIVE_NETWORK.chainHex = toChainHex(ACTIVE_NETWORK.chainId);
+  if (data.chainName) ACTIVE_NETWORK.chainName = String(data.chainName);
+  if (data.protocolVariant) ACTIVE_NETWORK.protocolVariant = String(data.protocolVariant);
+  if (data.makeit) ACTIVE_NETWORK.makeit = String(data.makeit);
+  if (data.oracle) ACTIVE_NETWORK.oracle = String(data.oracle);
+  if (data.swapAdapter) ACTIVE_NETWORK.swapAdapter = String(data.swapAdapter);
+  if (data.pool) ACTIVE_NETWORK.pool = String(data.pool);
+  if (data.usdc) ACTIVE_NETWORK.usdc = String(data.usdc);
+  if (data.usdt) ACTIVE_NETWORK.usdt = String(data.usdt);
+  if (data.weth) ACTIVE_NETWORK.weth = String(data.weth);
+  if (data.rpcUrl) ACTIVE_NETWORK.rpcUrl = normalizeLoopbackUrl(String(data.rpcUrl), rpcFallback);
+
+  if (data.backendUrl) {
+    ACTIVE_NETWORK.backendUrl = normalizeLoopbackUrl(String(data.backendUrl), backendFallback);
+  } else if (typeof window !== "undefined" && window.location?.origin) {
+    ACTIVE_NETWORK.backendUrl = window.location.origin.replace(/\/$/, "");
+  }
+
+  if (data.feeConfig && typeof data.feeConfig === "object") {
+    ACTIVE_NETWORK.feeConfig = {
+      liquidityProvisionFeePpm: Number(data.feeConfig.liquidityProvisionFeePpm || ACTIVE_NETWORK.feeConfig.liquidityProvisionFeePpm || 70),
+      protocolFeePpm: Number(data.feeConfig.protocolFeePpm || ACTIVE_NETWORK.feeConfig.protocolFeePpm || 30),
+      feeScaleFactorPpm: Number(data.feeConfig.feeScaleFactorPpm || ACTIVE_NETWORK.feeConfig.feeScaleFactorPpm || 1_000_000),
+    };
+  }
+
+  if (typeof data.localMode === "boolean") ACTIVE_NETWORK.localMode = data.localMode;
+  if (typeof data.publicMode === "boolean") ACTIVE_NETWORK.publicMode = data.publicMode;
+  if (data.adminDefaultUser) ACTIVE_NETWORK.adminDefaultUser = String(data.adminDefaultUser);
+  if (data.adminDefaultPassword) ACTIVE_NETWORK.adminDefaultPassword = String(data.adminDefaultPassword);
+  ACTIVE_NETWORK.updatedAt = new Date().toISOString();
+}
+
+export async function initializeActiveNetwork() {
+  if (typeof window === "undefined") return ACTIVE_NETWORK;
+  try {
+    const response = await fetch("/api/config", { method: "GET" });
+    if (!response.ok) return ACTIVE_NETWORK;
+    const data = await response.json();
+    applyRuntimeConfig(data);
+  } catch {
+  }
+  return ACTIVE_NETWORK;
+}
