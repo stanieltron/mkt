@@ -583,6 +583,8 @@ async function main() {
   console.log(`Runner private key: ${hdWallets.runner.privateKey}`);
   console.log(`Swapper wallet: ${wallets.swapper.address}`);
   console.log(`Swapper private key: ${hdWallets.swapper.privateKey}`);
+  console.log(`Faucet signer wallet: ${wallets.faucet.address}`);
+  console.log(`Faucet private key: ${hdWallets.faucet.privateKey}`);
 
   const requiredWethBackingWei =
     cfg.deployerWethMint18 +
