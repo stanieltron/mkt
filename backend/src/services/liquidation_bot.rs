@@ -233,6 +233,9 @@ impl LiquidationBotService {
                                     if ok {
                                         let mut submitted = svc.recently_submitted.lock().await;
                                         submitted.insert(trade_id, Instant::now());
+                                        if let Err(e) = svc.chain_sync.sync_trade(trade_id).await {
+                                            tracing::warn!("[bot] sync_trade after liquidation {} failed: {}", trade_id, e);
+                                        }
                                     }
                                     svc.push_log(
                                         trade_id,
@@ -310,6 +313,17 @@ impl LiquidationBotService {
                             }
                             if is_trade_not_open {
                                 sent = true;
+                                {
+                                    let mut submitted = svc.recently_submitted.lock().await;
+                                    submitted.insert(trade_id, Instant::now());
+                                }
+                                if let Err(sync_err) = svc.chain_sync.sync_trade(trade_id).await {
+                                    tracing::warn!(
+                                        "[bot] sync_trade for already-not-open {} failed: {}",
+                                        trade_id,
+                                        sync_err
+                                    );
+                                }
                                 svc.push_log(
                                     trade_id,
                                     attempt,

@@ -165,6 +165,14 @@ impl UserService {
                         referral.message = "Referral applied.".to_string();
                         referral.referrer_wallet_address = Some(r.1);
                         referral.referrer_code = Some(r.2);
+                        tracing::info!(
+                            "[user-service] referral added: userId={} wallet={} referredBy={} referrerWallet={} referrerCode={}",
+                            user.id,
+                            user.wallet_address,
+                            r.0,
+                            referral.referrer_wallet_address.as_deref().unwrap_or(""),
+                            referral.referrer_code.as_deref().unwrap_or("")
+                        );
                     }
                 } else {
                     referral.status = "not_found".to_string();

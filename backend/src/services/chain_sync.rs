@@ -519,6 +519,14 @@ impl ChainSyncService {
             )
             .await?;
         self.mark_processed(&tx_hash, log_index, block_number as i64).await?;
+        tracing::info!(
+            "[chain-sync] trade opened seen: tradeId={} wallet={} tx={} block={} logIndex={}",
+            trade_id,
+            wallet,
+            tx_hash,
+            block_number,
+            log_index
+        );
 
         let event_name = if is_closed { "trade_closed" } else { "trade_upsert" };
         let evt = self.realtime.make_event(
@@ -550,7 +558,8 @@ impl ChainSyncService {
                     tracing::error!("[chain-sync] tick failed: {}", e);
                 }
                 refresh_counter = refresh_counter.wrapping_add(1);
-                if refresh_counter % 30 == 0 {
+                // Fast self-heal: if an event is missed or delayed, reconcile OPEN rows from chain frequently.
+                if refresh_counter % 5 == 0 {
                     if let Err(e) = self.refresh_existing_open_trades().await {
                         tracing::warn!("[chain-sync] open refresh failed: {}", e);
                     }
@@ -724,6 +733,15 @@ impl ChainSyncService {
             )
             .await?;
         self.mark_processed(&tx_hash, log_index, block_number as i64).await?;
+        tracing::info!(
+            "[chain-sync] trade closed seen: tradeId={} wallet={} reason={} tx={} block={} logIndex={}",
+            trade_id,
+            wallet,
+            close.close_reason,
+            tx_hash,
+            block_number,
+            log_index
+        );
 
         let event_name = if is_closed { "trade_closed" } else { "trade_upsert" };
         let evt = self.realtime.make_event(
