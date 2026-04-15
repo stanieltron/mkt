@@ -35,6 +35,7 @@
     "// --- PRODUCTION BUILD & START ---": "",
     "build": "npm run install:prod && cargo build --manifest-path backend/Cargo.toml --release && npm --prefix frontend run build",
     "start": "node scripts/start-stack.js",
+    "start:local": "LOCAL_MODE=true PUBLIC_MODE=false node scripts/start-stack.js --local",
     "start:fresh": "node scripts/db-up.js --fresh && node scripts/db-init-rust.js --fresh && npm start"
   },
   "author": "",

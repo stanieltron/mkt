@@ -4,15 +4,20 @@
 const http = require("node:http");
 const https = require("node:https");
 const { spawn } = require("node:child_process");
-const { createReadStream, existsSync } = require("node:fs");
+const { createReadStream, existsSync, readFileSync } = require("node:fs");
 const { extname, join, normalize, resolve } = require("node:path");
 const { URL } = require("node:url");
 
 const root = process.cwd();
 const distDir = resolve(root, "frontend", "dist");
+const cliLocalMode = process.argv.includes("--local");
+const localMode = cliLocalMode || String(process.env.LOCAL_MODE || "").toLowerCase() === "true";
 const publicPort = Number(process.env.PORT || process.env.FRONTEND_PORT || 3000);
 const backendPort = Number(process.env.BACKEND_INTERNAL_PORT || process.env.BACKEND_PORT || 8788);
-const backendBase = new URL(process.env.BACKEND_INTERNAL_URL || `http://127.0.0.1:${backendPort}`);
+const relayPort = Number(process.env.BACKEND_RELAY_PORT || 8787);
+const backendBase = new URL(
+  process.env.BACKEND_INTERNAL_URL || `http://127.0.0.1:${localMode ? relayPort : backendPort}`
+);
 const backendBin = resolve(
   root,
   "backend",
@@ -20,6 +25,25 @@ const backendBin = resolve(
   "release",
   process.platform === "win32" ? "makeit-backend.exe" : "makeit-backend"
 );
+const faucetOverlayPath = resolve(root, "local_deploy_rust", "dev", "faucet-overlay.js");
+const adminOverlayPath = resolve(root, "local_deploy_rust", "dev", "admin-runner-overlay.js");
+
+let overlayInjectionHtml = "";
+if (localMode && existsSync(faucetOverlayPath) && existsSync(adminOverlayPath)) {
+  const apiBase = process.env.LOCAL_FAUCET_API_BASE || "";
+  const faucetOverlayCode = readFileSync(faucetOverlayPath, "utf8").replace(
+    "__LOCAL_FAUCET_API_BASE__",
+    JSON.stringify(apiBase)
+  );
+  const adminOverlayCode = readFileSync(adminOverlayPath, "utf8").replace(
+    "__LOCAL_ADMIN_API_BASE__",
+    JSON.stringify(apiBase)
+  );
+  overlayInjectionHtml = [
+    `<script type="module">${faucetOverlayCode}</script>`,
+    `<script type="module">${adminOverlayCode}</script>`,
+  ].join("");
+}
 
 if (!existsSync(distDir)) {
   console.error(`[start-stack] missing frontend build output at ${distDir}. Run npm run build first.`);
@@ -42,6 +66,20 @@ const backend = spawn(backendBin, {
   stdio: "inherit",
   shell: false,
 });
+let relay = null;
+if (localMode) {
+  relay = spawn("node", [resolve(root, "local_deploy_rust", "dev", "local-backend-relay.js")], {
+    cwd: root,
+    env: {
+      ...process.env,
+      BACKEND_PORT: String(relayPort),
+      LOCAL_BACKEND_UPSTREAM_PORT: String(backendPort),
+      LOCAL_BACKEND_UPSTREAM_URL: `http://127.0.0.1:${backendPort}`,
+    },
+    stdio: "inherit",
+    shell: false,
+  });
+}
 
 let shuttingDown = false;
 
@@ -51,10 +89,20 @@ function shutdown(code = 0) {
   try {
     backend.kill("SIGTERM");
   } catch {}
+  if (relay) {
+    try {
+      relay.kill("SIGTERM");
+    } catch {}
+  }
   setTimeout(() => {
     try {
       backend.kill("SIGKILL");
     } catch {}
+    if (relay) {
+      try {
+        relay.kill("SIGKILL");
+      } catch {}
+    }
     process.exit(code);
   }, 1200);
 }
@@ -64,6 +112,13 @@ backend.on("exit", (code) => {
   console.error(`[start-stack] backend exited with code ${code ?? 0}`);
   shutdown(code ?? 1);
 });
+if (relay) {
+  relay.on("exit", (code) => {
+    if (shuttingDown) return;
+    console.error(`[start-stack] relay exited with code ${code ?? 0}`);
+    shutdown(code ?? 1);
+  });
+}
 
 process.on("SIGINT", () => shutdown(0));
 process.on("SIGTERM", () => shutdown(0));
@@ -192,6 +247,18 @@ function serveSpaAsset(req, res) {
   const target = exists ? candidate : resolve(distDir, "index.html");
 
   try {
+    const isIndex = extname(target).toLowerCase() === ".html";
+    if (localMode && overlayInjectionHtml && isIndex) {
+      let html = readFileSync(target, "utf8");
+      if (html.includes("</body>")) {
+        html = html.replace("</body>", `${overlayInjectionHtml}</body>`);
+      } else {
+        html += overlayInjectionHtml;
+      }
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(html);
+      return;
+    }
     const type = contentTypeFor(target);
     res.writeHead(200, { "content-type": type });
     createReadStream(target).pipe(res);
@@ -222,4 +289,7 @@ server.on("upgrade", (req, socket, head) => {
 server.listen(publicPort, "0.0.0.0", () => {
   console.log(`[start-stack] frontend+gateway listening on http://0.0.0.0:${publicPort}`);
   console.log(`[start-stack] backend proxied to ${backendBase.toString()}`);
+  if (localMode) {
+    console.log(`[start-stack] local relay enabled on http://127.0.0.1:${relayPort}`);
+  }
 });

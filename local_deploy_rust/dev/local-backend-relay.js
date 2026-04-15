@@ -21,7 +21,19 @@ const swapAdapterAddress = process.env.SWAP_ADAPTER_ADDRESS || "";
 const oracleAddress = process.env.ORACLE_ADDRESS || "";
 const swapperAddress = process.env.SWAPPER_ADDRESS || "";
 const artifactPath = resolve(process.cwd(), "local_deploy_rust", "out", "LocalFaucet.sol", "LocalFaucet.json");
-const artifact = JSON.parse(readFileSync(artifactPath, "utf8"));
+const fallbackFaucetAbi = [
+  "function claimTo(address recipient)",
+  "error CooldownActive(uint256 retryAfterMs)",
+  "error InvalidRecipient()",
+  "error TokenTransferFailed()",
+  "error EthTransferFailed()",
+];
+let artifact = { abi: fallbackFaucetAbi };
+try {
+  artifact = JSON.parse(readFileSync(artifactPath, "utf8"));
+} catch {
+  console.warn(`[local-backend-relay] faucet artifact missing at ${artifactPath}, using fallback ABI`);
+}
 
 const faucetInfo = {
   enabled: Boolean(faucetAddress && faucetPrivateKey),
