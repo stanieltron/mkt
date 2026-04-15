@@ -15,11 +15,14 @@ const rpcUrl = process.env.RPC_URL || "http://127.0.0.1:8545";
 const faucetAddress = process.env.FAUCET_ADDRESS || "";
 const faucetPrivateKey = process.env.FAUCET_PRIVATE_KEY || "";
 const runnerPrivateKey = process.env.RUNNER_PRIVATE_KEY || "";
+const swapperPrivateKey = process.env.SWAPPER_PRIVATE_KEY || "";
 const adminUsername = process.env.ADMIN_USERNAME || "admin";
 const adminPassword = process.env.ADMIN_PASSWORD || "admin123";
 const swapAdapterAddress = process.env.SWAP_ADAPTER_ADDRESS || "";
 const oracleAddress = process.env.ORACLE_ADDRESS || "";
-const swapperAddress = process.env.SWAPPER_ADDRESS || "";
+const swapperAddressFromKey = swapperPrivateKey ? new Wallet(swapperPrivateKey).address : "";
+const swapperAddress = process.env.SWAPPER_ADDRESS || swapperAddressFromKey || "";
+const runnerAddress = process.env.RUNNER_ADDRESS || "";
 const artifactPath = resolve(process.cwd(), "local_deploy_rust", "out", "LocalFaucet.sol", "LocalFaucet.json");
 const fallbackFaucetAbi = [
   "function claimTo(address recipient)",
@@ -50,6 +53,7 @@ const runnerSigner = runnerPrivateKey ? new NonceManager(new Wallet(runnerPrivat
 const swapRunner = new SwapRunnerService({
   provider,
   signer: runnerSigner,
+  configuredRunnerAddress: runnerAddress,
   swapAdapterAddress,
   oracleAddress,
   swapperAddress,
@@ -396,6 +400,15 @@ server.listen(publicPort, "127.0.0.1", () => {
   console.log(
     `[local-backend-relay] listening on http://127.0.0.1:${publicPort} -> ${upstreamBase.toString()}`
   );
+  if (runnerAddress) {
+    console.log(`[local-backend-relay] RUNNER_ADDRESS=${runnerAddress}`);
+  }
+  if (swapperAddress) {
+    console.log(`[local-backend-relay] SWAPPER_ADDRESS=${swapperAddress}`);
+  }
+  if (faucetAddress) {
+    console.log(`[local-backend-relay] FAUCET_ADDRESS=${faucetAddress}`);
+  }
 });
 
 swapRunner.init().catch((error) => {

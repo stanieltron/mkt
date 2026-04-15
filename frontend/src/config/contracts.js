@@ -62,6 +62,9 @@ export const ACTIVE_NETWORK = {
   usdc: appEnv.USDC_ADDRESS || generated.usdc || "",
   usdt: appEnv.USDT_ADDRESS || generated.usdt || "",
   weth: appEnv.WETH_ADDRESS || generated.weth || "",
+  runnerAddress: appEnv.RUNNER_ADDRESS || generated.runnerAddress || "",
+  swapperAddress: appEnv.SWAPPER_ADDRESS || generated.swapperAddress || "",
+  faucetAddress: appEnv.FAUCET_ADDRESS || generated.faucetAddress || "",
   usdcDecimals,
   usdtDecimals,
   wethDecimals,
@@ -95,6 +98,9 @@ function applyRuntimeConfig(data) {
   if (data.usdc) ACTIVE_NETWORK.usdc = String(data.usdc);
   if (data.usdt) ACTIVE_NETWORK.usdt = String(data.usdt);
   if (data.weth) ACTIVE_NETWORK.weth = String(data.weth);
+  if (data.runnerAddress) ACTIVE_NETWORK.runnerAddress = String(data.runnerAddress);
+  if (data.swapperAddress) ACTIVE_NETWORK.swapperAddress = String(data.swapperAddress);
+  if (data.faucetAddress) ACTIVE_NETWORK.faucetAddress = String(data.faucetAddress);
   if (data.rpcUrl) ACTIVE_NETWORK.rpcUrl = normalizeLoopbackUrl(String(data.rpcUrl), rpcFallback);
 
   if (data.backendUrl) {

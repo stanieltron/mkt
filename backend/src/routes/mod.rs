@@ -401,6 +401,9 @@ async fn config() -> impl IntoResponse {
         "usdc": env::var("USDC_ADDRESS").ok().filter(|v| !v.is_empty()),
         "usdt": env::var("USDT_ADDRESS").ok().filter(|v| !v.is_empty()),
         "weth": env::var("WETH_ADDRESS").ok().filter(|v| !v.is_empty()),
+        "runnerAddress": env::var("RUNNER_ADDRESS").ok().filter(|v| !v.is_empty()),
+        "swapperAddress": env::var("SWAPPER_ADDRESS").ok().filter(|v| !v.is_empty()),
+        "faucetAddress": env::var("FAUCET_ADDRESS").ok().filter(|v| !v.is_empty()),
         "adminDefaultUser": env::var("ADMIN_USERNAME").ok().filter(|v| !v.is_empty()),
         "adminDefaultPassword": env::var("ADMIN_PASSWORD").ok().filter(|v| !v.is_empty()),
         "feeConfig": {

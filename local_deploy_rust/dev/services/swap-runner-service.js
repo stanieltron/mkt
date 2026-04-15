@@ -6,6 +6,7 @@ class SwapRunnerService {
   constructor({
     provider,
     signer,
+    configuredRunnerAddress,
     swapAdapterAddress,
     oracleAddress,
     swapperAddress,
@@ -13,6 +14,7 @@ class SwapRunnerService {
   }) {
     this.provider = provider;
     this.signer = signer;
+    this.configuredRunnerAddress = String(configuredRunnerAddress || "");
     this.swapAdapterAddress = swapAdapterAddress;
     this.oracleAddress = oracleAddress;
     this.swapperAddress = String(swapperAddress || "");
@@ -117,7 +119,13 @@ class SwapRunnerService {
 
   async init() {
     if (!this.signer) {
-      this.pushLog({ level: "warn", result: "runner-disabled-no-signer" });
+      this.runnerAddress = this.configuredRunnerAddress || "";
+      this.pushLog({
+        level: "warn",
+        result: "runner-disabled-no-signer",
+        runnerAddress: this.runnerAddress,
+        swapperAddress: this.swapperAddress || "",
+      });
       return;
     }
 
@@ -138,6 +146,7 @@ class SwapRunnerService {
       level: "info",
       result: "runner-ready",
       runnerAddress: this.runnerAddress,
+      swapperAddress: this.swapperAddress || "",
       config: this.getState(),
     });
 
@@ -465,6 +474,7 @@ class SwapRunnerService {
       baseNotionalUsdc6: this.config.baseNotionalUsdc6.toString(),
       ready: this.ready,
       runnerAddress: this.runnerAddress || "",
+      swapperAddress: this.swapperAddress || "",
       logs: this.logs.slice(0, 50),
     };
   }

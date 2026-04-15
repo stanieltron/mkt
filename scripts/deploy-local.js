@@ -388,6 +388,9 @@ function writeEnvFiles(deployment, wallets) {
     usdc: deployment.usdc,
     usdt: deployment.usdt,
     weth: deployment.weth,
+    runnerAddress: wallets.runner.address,
+    swapperAddress: wallets.swapper.address,
+    faucetAddress: deployment.faucet?.address || "",
     pool: deployment.pool,
     rpcUrl: localDeployEnv.RPC_URL,
     backendUrl: backendUrl,
@@ -576,6 +579,10 @@ async function main() {
   const deployer = wallets.deployer;
   const deployerAddress = await deployer.getAddress();
   console.log(`Deployer: ${deployerAddress}`);
+  console.log(`Runner wallet: ${wallets.runner.address}`);
+  console.log(`Runner private key: ${hdWallets.runner.privateKey}`);
+  console.log(`Swapper wallet: ${wallets.swapper.address}`);
+  console.log(`Swapper private key: ${hdWallets.swapper.privateKey}`);
 
   const requiredWethBackingWei =
     cfg.deployerWethMint18 +
