@@ -107,9 +107,10 @@ impl UserService {
             if id == user_id { return Ok(true); }
             if seen.contains(&id) { return Ok(true); }
             seen.insert(id);
-            let row = sqlx::query!(r#"SELECT "referredBy" FROM "User" WHERE id = $1"#, id)
+            let row: Option<(Option<i32>,)> = sqlx::query_as(r#"SELECT "referredBy" FROM "User" WHERE id = $1"#)
+                .bind(id)
                 .fetch_optional(&mut **tx).await?;
-            current_id = row.and_then(|r| r.referredBy);
+            current_id = row.and_then(|r| r.0);
         }
         Ok(false)
     }
@@ -127,35 +128,43 @@ impl UserService {
             referral.code = referral_code.clone();
 
             if let Some(ref_by) = user.referred_by {
-                let existing = sqlx::query!(r#"SELECT "walletAddress", "referralCode" FROM "User" WHERE id = $1"#, ref_by)
+                let existing: Option<(String, String)> = sqlx::query_as(
+                    r#"SELECT "walletAddress", "referralCode" FROM "User" WHERE id = $1"#
+                )
+                    .bind(ref_by)
                     .fetch_optional(&mut *tx).await?;
                 referral.status = "already_set".to_string();
                 referral.message = "Referrer is already set and cannot be changed.".to_string();
                 if let Some(e) = existing {
-                    referral.referrer_wallet_address = Some(e.walletAddress);
-                    referral.referrer_code = Some(e.referralCode);
+                    referral.referrer_wallet_address = Some(e.0);
+                    referral.referrer_code = Some(e.1);
                 }
             } else {
-                let referrer = sqlx::query!(r#"SELECT id, "walletAddress", "referralCode" FROM "User" WHERE "referralCode" = $1"#, referral_code)
+                let referrer: Option<(i32, String, String)> = sqlx::query_as(
+                    r#"SELECT id, "walletAddress", "referralCode" FROM "User" WHERE "referralCode" = $1"#
+                )
+                    .bind(&referral_code)
                     .fetch_optional(&mut *tx).await?;
 
                 if let Some(r) = referrer {
-                    if r.id == user.id {
+                    if r.0 == user.id {
                         referral.status = "self_referral".to_string();
                         referral.message = "Self referral is not allowed.".to_string();
-                    } else if Self::would_create_referral_cycle(&mut tx, user.id, r.id).await? {
+                    } else if Self::would_create_referral_cycle(&mut tx, user.id, r.0).await? {
                         referral.status = "circular_referral".to_string();
                         referral.message = "Circular referral is not allowed.".to_string();
                     } else {
-                        sqlx::query!(r#"UPDATE "User" SET "referredBy" = $1 WHERE id = $2"#, r.id, user.id)
+                        sqlx::query(r#"UPDATE "User" SET "referredBy" = $1 WHERE id = $2"#)
+                            .bind(r.0)
+                            .bind(user.id)
                             .execute(&mut *tx).await?;
                         user = sqlx::query_as(r#"SELECT * FROM "User" WHERE id = $1"#)
                             .bind(user.id)
                             .fetch_one(&mut *tx).await?;
                         referral.status = "applied".to_string();
                         referral.message = "Referral applied.".to_string();
-                        referral.referrer_wallet_address = Some(r.walletAddress);
-                        referral.referrer_code = Some(r.referralCode);
+                        referral.referrer_wallet_address = Some(r.1);
+                        referral.referrer_code = Some(r.2);
                     }
                 } else {
                     referral.status = "not_found".to_string();
