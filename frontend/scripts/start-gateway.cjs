@@ -73,6 +73,66 @@ function proxyHttpToBase(req, res, base, reqPath) {
   req.pipe(proxyReq);
 }
 
+function writeUpgradeResponse(socket, statusCode, statusMessage, headers = {}) {
+  const lines = [`HTTP/1.1 ${statusCode} ${statusMessage}`];
+  for (const [key, value] of Object.entries(headers)) {
+    if (value === undefined || value === null) continue;
+    if (Array.isArray(value)) {
+      for (const entry of value) lines.push(`${key}: ${entry}`);
+    } else {
+      lines.push(`${key}: ${value}`);
+    }
+  }
+  lines.push("", "");
+  socket.write(lines.join("\r\n"));
+}
+
+function proxyWebSocket(req, socket, head, base, reqPath) {
+  const upstreamUrl = new URL(reqPath || req.url || "/", base);
+  const client = upstreamUrl.protocol === "https:" ? https : http;
+  const proxyReq = client.request(upstreamUrl, {
+    method: req.method || "GET",
+    headers: {
+      ...req.headers,
+      host: upstreamUrl.host,
+      connection: "Upgrade",
+      upgrade: req.headers.upgrade || "websocket",
+    },
+  });
+
+  proxyReq.on("upgrade", (proxyRes, proxySocket, proxyHead) => {
+    writeUpgradeResponse(
+      socket,
+      proxyRes.statusCode || 101,
+      proxyRes.statusMessage || "Switching Protocols",
+      proxyRes.headers
+    );
+    if (proxyHead && proxyHead.length > 0) socket.write(proxyHead);
+    if (head && head.length > 0) proxySocket.write(head);
+    socket.pipe(proxySocket);
+    proxySocket.pipe(socket);
+  });
+
+  proxyReq.on("response", (proxyRes) => {
+    writeUpgradeResponse(
+      socket,
+      proxyRes.statusCode || 502,
+      proxyRes.statusMessage || "Bad Gateway",
+      proxyRes.headers
+    );
+    socket.destroy();
+  });
+
+  proxyReq.on("error", () => {
+    try {
+      writeUpgradeResponse(socket, 502, "Bad Gateway", { "content-type": "text/plain" });
+    } catch {}
+    socket.destroy();
+  });
+
+  proxyReq.end();
+}
+
 function requestJson(targetUrl, { method = "GET", body } = {}) {
   return new Promise((resolvePromise, reject) => {
     const urlObj = new URL(targetUrl);
@@ -203,6 +263,16 @@ const server = http.createServer((req, res) => {
   }
 
   serveSpaAsset(req, res);
+});
+
+server.on("upgrade", (req, socket, head) => {
+  const urlObj = new URL(req.url || "/", `http://127.0.0.1:${publicPort}`);
+  const pathname = urlObj.pathname;
+  if (pathname === "/ws" || pathname.startsWith("/ws?")) {
+    proxyWebSocket(req, socket, head, backendBase, req.url || "/ws");
+    return;
+  }
+  socket.destroy();
 });
 
 server.listen(publicPort, "0.0.0.0", () => {
