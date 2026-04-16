@@ -17,7 +17,7 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 
 WORKDIR /app
 
-COPY package.json ./
+COPY package.json package-lock.json ./
 COPY Cargo.toml Cargo.lock ./
 COPY abi ./abi
 COPY migrations ./migrations
