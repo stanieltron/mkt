@@ -19,6 +19,13 @@ local_deploy_rust/cache/
 local_deploy_rust/out/
 local_deploy_rust/broadcast/
 local_deploy_rust/deployments/
+local-node/cache/
+local-node/out/
+local-node/broadcast/
+local-node/local_deploy_rust/cache/
+local-node/local_deploy_rust/out/
+local-node/local_deploy_rust/broadcast/
+local-node/local_deploy_rust/deployments/
 
 # --- environment files ---
 # .env.example files are templates and ARE committed
@@ -28,6 +35,8 @@ local_deploy_rust/deployments/
 local_deploy_rust/.env
 e2e/.env
 frontend/.env
+backend/.env
+local-node/.env
 
 # --- generated/runtime logs ---
 *.log

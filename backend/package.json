@@ -1,0 +1,17 @@
+{
+  "name": "mkt-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Makeit backend service (standalone monorepo app)",
+  "scripts": {
+    "build": "cargo build --release",
+    "start": "node scripts/start.js",
+    "start:public": "PUBLIC_MODE=true LOCAL_MODE=false node scripts/start.js --public",
+    "start:local": "LOCAL_MODE=true PUBLIC_MODE=false node scripts/start.js --local",
+    "start:local:fresh": "node scripts/db-fresh.js && LOCAL_MODE=true PUBLIC_MODE=false node scripts/start.js --local"
+  },
+  "dependencies": {
+    "ethers": "^6.16.0",
+    "pg": "^8.11.3"
+  }
+}

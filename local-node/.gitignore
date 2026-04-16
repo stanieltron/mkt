@@ -1,0 +1,19 @@
+﻿node_modules/
+
+# generated runtime files
+local_deploy_rust/.env
+e2e/.env
+frontend/
+
+# foundry artifacts
+foundry/bin/
+foundry/foundry.zip
+foundry/_foundry_download.zip
+local_deploy_rust/out/
+local_deploy_rust/cache/
+solidity/out/
+solidity/cache/
+
+# misc
+*.log
+.env

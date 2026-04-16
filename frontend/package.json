@@ -1,24 +1,26 @@
 {
-  "name": "makeit-frontend",
-  "private": true,
-  "version": "0.1.0",
-  "type": "module",
-  "scripts": {
-    "dev": "vite --host --strictPort",
-    "build": "vite build",
-    "test": "vitest run",
-    "preview": "vite preview --host",
-    "start": "vite preview --host 0.0.0.0 --port ${PORT:-4173}"
-  },
-  "dependencies": {
-    "ethers": "^6.15.0",
-    "lightweight-charts": "^4.2.2",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1"
-  },
-  "devDependencies": {
-    "@vitejs/plugin-react": "^4.4.1",
-    "vite": "^5.4.12",
-    "vitest": "^2.1.9"
-  }
+    "name":  "makeit-frontend",
+    "private":  true,
+    "version":  "0.1.0",
+    "type":  "module",
+    "scripts":  {
+                    "dev":  "vite --host --strictPort",
+                    "build":  "vite build",
+                    "test":  "vitest run",
+                    "preview":  "vite preview --host",
+                    "start":  "node scripts/start-gateway.cjs",
+                    "start:public":  "PUBLIC_MODE=true ENABLE_LOCAL_OVERLAYS=true node scripts/start-gateway.cjs",
+                    "start:local":  "LOCAL_MODE=true ENABLE_LOCAL_OVERLAYS=true node scripts/start-gateway.cjs"
+                },
+    "dependencies":  {
+                         "ethers":  "^6.15.0",
+                         "lightweight-charts":  "^4.2.2",
+                         "react":  "^18.3.1",
+                         "react-dom":  "^18.3.1"
+                     },
+    "devDependencies":  {
+                            "@vitejs/plugin-react":  "^4.4.1",
+                            "vite":  "^5.4.12",
+                            "vitest":  "^2.1.9"
+                        }
 }
