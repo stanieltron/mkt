@@ -5,6 +5,7 @@ const { spawn } = require("node:child_process");
 const { resolve } = require("node:path");
 const http = require("node:http");
 const https = require("node:https");
+const { WebSocketProvider } = require("ethers");
 
 const root = process.cwd();
 const localModeArg = process.argv.includes("--local");
@@ -25,6 +26,7 @@ const backendBin = resolve(
 );
 const relayScript = resolve(root, "local-relay", "local-backend-relay.js");
 const backendRpcUrl = process.env.BACKEND_RPC_URL || process.env.RPC_URL || "";
+const backendWsRpcUrl = process.env.BACKEND_WS_RPC_URL || "";
 
 const children = [];
 let shuttingDown = false;
@@ -179,6 +181,16 @@ setTimeout(async () => {
         body: { jsonrpc: "2.0", method: "web3_clientVersion", params: [], id: 1 },
       });
       if (!json?.result) throw new Error("missing web3_clientVersion");
+    });
+  }
+  if (backendWsRpcUrl) {
+    await runCheck("ws-upstream", backendWsRpcUrl, async () => {
+      const provider = new WebSocketProvider(backendWsRpcUrl);
+      try {
+        await provider.getNetwork();
+      } finally {
+        await provider.destroy();
+      }
     });
   }
 }, 1200);
