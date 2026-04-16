@@ -38,8 +38,8 @@ const backendFallback =
     ? window.location.origin
     : `http://${runtimeHost}:8787`;
 const rpcFallback = `http://${runtimeHost}:8545`;
-const backendRaw = appEnv.BACKEND_URL || generated.backendUrl || "";
-const rpcRaw = appEnv.RPC_URL || generated.rpcUrl || "";
+const backendRaw = appEnv.BACKEND_URL || "";
+const rpcRaw = appEnv.RPC_URL || "";
 const makeitAddress = appEnv.MAKEIT_ADDRESS || generated.makeit || "";
 
 const defaultLpFeePpm = Number(appEnv.LP_FEE_PPM || generated.lpFeePpm || 70);
@@ -80,7 +80,7 @@ export const ACTIVE_NETWORK = {
     String(appEnv.LOCAL_MODE || String(generated.localMode || "false")).toLowerCase() === "true"
       ? localRpcProxyUrl() || normalizeLoopbackUrl(rpcRaw, rpcFallback)
       : normalizeLoopbackUrl(rpcRaw, rpcFallback),
-  backendUrl: normalizeLoopbackUrl(appEnv.BACKEND_URL || generated.backendUrl || "", backendFallback),
+  backendUrl: normalizeLoopbackUrl(appEnv.BACKEND_URL || "", backendFallback),
   feeConfig: {
     liquidityProvisionFeePpm: defaultLpFeePpm,
     protocolFeePpm: defaultProtocolFeePpm,

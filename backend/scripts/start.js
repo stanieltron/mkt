@@ -3,6 +3,8 @@
 
 const { spawn } = require("node:child_process");
 const { resolve } = require("node:path");
+const http = require("node:http");
+const https = require("node:https");
 
 const root = process.cwd();
 const localModeArg = process.argv.includes("--local");
@@ -22,9 +24,83 @@ const backendBin = resolve(
   process.platform === "win32" ? "makeit-backend.exe" : "makeit-backend"
 );
 const relayScript = resolve(root, "local-relay", "local-backend-relay.js");
+const backendRpcUrl = process.env.BACKEND_RPC_URL || process.env.RPC_URL || "";
 
 const children = [];
 let shuttingDown = false;
+const GREEN = "\x1b[32m";
+const RED = "\x1b[31m";
+const RESET = "\x1b[0m";
+
+function statusLabel(ok) {
+  return ok ? `${GREEN}[ok]${RESET}` : `${RED}[failed]${RESET}`;
+}
+
+function requestJson(targetUrl, { method = "GET", body, headers = {} } = {}) {
+  return new Promise((resolvePromise, reject) => {
+    let urlObj;
+    try {
+      urlObj = new URL(targetUrl);
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    const client = urlObj.protocol === "https:" ? https : http;
+    const payload = body ? JSON.stringify(body) : null;
+    const req = client.request(
+      urlObj,
+      {
+        method,
+        headers: {
+          ...(payload ? { "content-type": "application/json" } : {}),
+          ...headers,
+        },
+      },
+      (res) => {
+        let raw = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk) => (raw += chunk));
+        res.on("end", () => {
+          const code = Number(res.statusCode || 0);
+          if (code < 200 || code >= 300) {
+            reject(new Error(`HTTP ${code}: ${raw || res.statusMessage || "request failed"}`));
+            return;
+          }
+          try {
+            resolvePromise(raw ? JSON.parse(raw) : {});
+          } catch {
+            resolvePromise({});
+          }
+        });
+      }
+    );
+    req.on("error", reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+function delay(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function runCheck(name, target, fn, attempts = 20, delayMs = 500) {
+  let lastError = null;
+  for (let i = 0; i < attempts; i += 1) {
+    try {
+      await fn();
+      console.log(`${statusLabel(true)} [backend-start] ${name} -> ${target}`);
+      return true;
+    } catch (error) {
+      lastError = error;
+      await delay(delayMs);
+    }
+  }
+  console.log(
+    `${statusLabel(false)} [backend-start] ${name} -> ${target} (${String(lastError?.message || lastError)})`
+  );
+  return false;
+}
 
 function start(name, cmd, args, env) {
   const child = spawn(cmd, args, {
@@ -69,6 +145,7 @@ if (localMode) {
   start("local-relay", "node", [relayScript], {
     ...process.env,
     BACKEND_PORT: String(relayPort),
+    BACKEND_BIND_HOST: process.env.BACKEND_BIND_HOST || "0.0.0.0",
     LOCAL_BACKEND_UPSTREAM_PORT: String(backendInternalPort),
     LOCAL_BACKEND_UPSTREAM_URL: `http://127.0.0.1:${backendInternalPort}`,
   });
@@ -81,3 +158,27 @@ backend.on("spawn", () => {
   if (localMode) return;
   console.log("[backend-start] started");
 });
+
+setTimeout(async () => {
+  const upstreamHealth = `http://127.0.0.1:${backendPort}/api/health`;
+  const relayHealth = `http://127.0.0.1:${relayPort}/api/health`;
+  await runCheck("backend-upstream", upstreamHealth, async () => {
+    const json = await requestJson(upstreamHealth);
+    if (!json?.ok) throw new Error("health not ok");
+  });
+  if (localMode) {
+    await runCheck("backend-relay", relayHealth, async () => {
+      const json = await requestJson(relayHealth);
+      if (!json?.ok) throw new Error("relay health not ok");
+    });
+  }
+  if (backendRpcUrl) {
+    await runCheck("rpc-upstream", backendRpcUrl, async () => {
+      const json = await requestJson(backendRpcUrl, {
+        method: "POST",
+        body: { jsonrpc: "2.0", method: "web3_clientVersion", params: [], id: 1 },
+      });
+      if (!json?.result) throw new Error("missing web3_clientVersion");
+    });
+  }
+}, 1200);

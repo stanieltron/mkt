@@ -13,6 +13,13 @@ const publicPort = Number(process.env.PORT || 3000);
 const backendBase = new URL(process.env.BACKEND_URL || `http://127.0.0.1:${process.env.BACKEND_PORT || 8787}`);
 const rpcBaseRaw = process.env.FRONTEND_RPC_URL || process.env.RPC_URL || "";
 const rpcBase = rpcBaseRaw ? new URL(rpcBaseRaw) : null;
+const GREEN = "\x1b[32m";
+const RED = "\x1b[31m";
+const RESET = "\x1b[0m";
+
+function statusLabel(ok) {
+  return ok ? `${GREEN}[ok]${RESET}` : `${RED}[failed]${RESET}`;
+}
 
 const overlayEnabled = String(process.env.ENABLE_LOCAL_OVERLAYS || "true").toLowerCase() === "true";
 const faucetOverlayPath = resolve(root, "overlays", "faucet-overlay.js");
@@ -64,6 +71,63 @@ function proxyHttpToBase(req, res, base, reqPath) {
   });
 
   req.pipe(proxyReq);
+}
+
+function requestJson(targetUrl, { method = "GET", body } = {}) {
+  return new Promise((resolvePromise, reject) => {
+    const urlObj = new URL(targetUrl);
+    const client = urlObj.protocol === "https:" ? https : http;
+    const payload = body ? JSON.stringify(body) : null;
+    const req = client.request(
+      urlObj,
+      {
+        method,
+        headers: payload ? { "content-type": "application/json" } : {},
+      },
+      (res) => {
+        let raw = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk) => (raw += chunk));
+        res.on("end", () => {
+          const code = Number(res.statusCode || 0);
+          if (code < 200 || code >= 300) {
+            reject(new Error(`HTTP ${code}: ${raw || res.statusMessage || "request failed"}`));
+            return;
+          }
+          try {
+            resolvePromise(raw ? JSON.parse(raw) : {});
+          } catch {
+            resolvePromise({});
+          }
+        });
+      }
+    );
+    req.on("error", reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+function delay(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function runCheck(name, target, fn, attempts = 20, delayMs = 500) {
+  let lastError = null;
+  for (let i = 0; i < attempts; i += 1) {
+    try {
+      await fn();
+      console.log(`${statusLabel(true)} [frontend-gateway] ${name} -> ${target}`);
+      return true;
+    } catch (error) {
+      lastError = error;
+      await delay(delayMs);
+    }
+  }
+  console.log(
+    `${statusLabel(false)} [frontend-gateway] ${name} -> ${target} (${String(lastError?.message || lastError)})`
+  );
+  return false;
 }
 
 function contentTypeFor(filePath) {
@@ -150,4 +214,22 @@ server.listen(publicPort, "0.0.0.0", () => {
   if (overlayEnabled) {
     console.log("[frontend-gateway] overlays enabled (faucet/admin runner)");
   }
+  setTimeout(async () => {
+    await runCheck("backend-connect", `${backendBase.toString()}api/health`, async () => {
+      const json = await requestJson(new URL("/api/health", backendBase).toString());
+      if (!json?.ok) throw new Error("backend health not ok");
+    });
+    await runCheck("fe->be via gateway", `http://127.0.0.1:${publicPort}/api/config`, async () => {
+      await requestJson(`http://127.0.0.1:${publicPort}/api/config`);
+    });
+    if (rpcBase) {
+      await runCheck("rpc-connect", rpcBase.toString(), async () => {
+        const json = await requestJson(rpcBase.toString(), {
+          method: "POST",
+          body: { jsonrpc: "2.0", method: "web3_clientVersion", params: [], id: 1 },
+        });
+        if (!json?.result) throw new Error("missing web3_clientVersion");
+      });
+    }
+  }, 1000);
 });

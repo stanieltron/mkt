@@ -9,6 +9,7 @@ const { Contract, JsonRpcProvider, Wallet, NonceManager } = require("ethers");
 const { SwapRunnerService } = require("./services/swap-runner-service.js");
 
 const publicPort = Number(process.env.BACKEND_PORT || 8787);
+const bindHost = process.env.BACKEND_BIND_HOST || "0.0.0.0";
 const upstreamPort = Number(process.env.LOCAL_BACKEND_UPSTREAM_PORT || 8788);
 const upstreamBase = new URL(process.env.LOCAL_BACKEND_UPSTREAM_URL || `http://127.0.0.1:${upstreamPort}`);
 const rpcUrl = process.env.BACKEND_RPC_URL || process.env.RPC_URL || "http://127.0.0.1:8545";
@@ -399,9 +400,9 @@ server.on("upgrade", (req, socket, head) => {
   proxyWebSocket(req, socket, head);
 });
 
-server.listen(publicPort, "127.0.0.1", () => {
+server.listen(publicPort, bindHost, () => {
   console.log(
-    `[local-backend-relay] listening on http://127.0.0.1:${publicPort} -> ${upstreamBase.toString()}`
+    `[local-backend-relay] listening on http://${bindHost}:${publicPort} -> ${upstreamBase.toString()}`
   );
   if (runnerAddress) {
     console.log(`[local-backend-relay] RUNNER_ADDRESS=${runnerAddress}`);
