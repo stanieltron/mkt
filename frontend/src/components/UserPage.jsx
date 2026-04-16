@@ -79,6 +79,24 @@ function usdc6ToNumber(value) {
   }
 }
 
+function fmtTokenUnits(rawValue, decimals = 18) {
+  try {
+    return Number(formatUnits(BigInt(rawValue || 0), Number(decimals || 18)));
+  } catch {
+    return 0;
+  }
+}
+
+function fmtDuration(ms) {
+  const totalSeconds = Math.max(0, Math.round(Number(ms || 0) / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  if (hours > 0 && minutes > 0) return `${hours}h ${minutes}m`;
+  if (hours > 0) return `${hours}h`;
+  if (minutes > 0) return `${minutes}m`;
+  return `${totalSeconds}s`;
+}
+
 function e18ToNumber(value) {
   try {
     return Number(formatUnits(BigInt(value), 18));
@@ -848,6 +866,10 @@ export default function UserPage() {
   const [usdcBalance, setUsdcBalance] = useState(0);
   const [usdcDecimals, setUsdcDecimals] = useState(QUOTE_TOKEN_DECIMALS);
   const [ethBalance, setEthBalance] = useState(0);
+  const [faucetInfo, setFaucetInfo] = useState({ enabled: false });
+  const [faucetBusy, setFaucetBusy] = useState(false);
+  const [faucetMessage, setFaucetMessage] = useState("");
+  const [faucetTone, setFaucetTone] = useState("muted");
   const [pendingTrade, setPendingTrade] = useState(null);
   const [expandedTradeId, setExpandedTradeId] = useState(null);
   const [approvalPrompt, setApprovalPrompt] = useState(null);
@@ -1243,6 +1265,53 @@ export default function UserPage() {
     [readProvider]
   );
 
+  const loadFaucetInfo = useCallback(async () => {
+    try {
+      const info = await apiGet("/api/faucet/info");
+      setFaucetInfo(info || { enabled: false });
+      if (!info?.enabled) {
+        setFaucetMessage("");
+        setFaucetTone("muted");
+      }
+    } catch {
+      setFaucetInfo({ enabled: false });
+      setFaucetMessage("");
+      setFaucetTone("muted");
+    }
+  }, []);
+
+  const requestFaucet = useCallback(async () => {
+    if (!walletAddress) {
+      setFaucetTone("error");
+      setFaucetMessage("Connect wallet first.");
+      return;
+    }
+    setFaucetBusy(true);
+    setFaucetMessage("");
+    setFaucetTone("muted");
+    try {
+      const result = await apiPost("/api/faucet/claim", { walletAddress });
+      const ethAmount = fmtTokenUnits(result?.ethWei || faucetInfo.ethWei || 0, 18);
+      const usdcAmount = fmtTokenUnits(result?.usdc6 || faucetInfo.usdc6 || 0, QUOTE_TOKEN_DECIMALS);
+      const payoutBits = [];
+      if (ethAmount > 0) payoutBits.push(`${fmt(ethAmount, 6)} ETH`);
+      if (usdcAmount > 0) payoutBits.push(`${fmt(usdcAmount, 2)} USD`);
+      setFaucetTone("success");
+      setFaucetMessage(payoutBits.length ? `Sent ${payoutBits.join(" + ")}.` : "Faucet request sent.");
+      await Promise.all([loadUsdcBalance(walletAddress), loadEthBalance(walletAddress)]);
+    } catch (claimError) {
+      const retryAfterMs = Number(claimError?.body?.retryAfterMs || 0);
+      if (Number(claimError?.status) === 429 && retryAfterMs > 0) {
+        setFaucetMessage(`Cooldown active. Try again in ${fmtDuration(retryAfterMs)}.`);
+      } else {
+        setFaucetMessage(getErrorMessage(claimError));
+      }
+      setFaucetTone("error");
+    } finally {
+      setFaucetBusy(false);
+    }
+  }, [walletAddress, faucetInfo.ethWei, faucetInfo.usdc6, loadEthBalance, loadUsdcBalance]);
+
   const refreshAfterTradeAction = useCallback(
       async (wallet, tradeId = null) => {
         const backendSyncOk = await requestBackendTradeSync(tradeId);
@@ -1422,6 +1491,27 @@ export default function UserPage() {
       setError("Connect wallet first");
       return false;
     }
+    const desiredChain = {
+      chainId: ACTIVE_NETWORK.chainHex,
+      chainName: ACTIVE_NETWORK.chainName,
+      rpcUrls: [ACTIVE_NETWORK.rpcUrl],
+      nativeCurrency: { name: "ETH", symbol: "ETH", decimals: 18 },
+    };
+    // Proactively refresh MetaMask chain config (especially RPC URL) for local Anvil mode.
+    // MetaMask keeps chainId entries; wallet_addEthereumChain can update metadata/rpc for existing chain ids.
+    try {
+      if (ACTIVE_NETWORK.localMode && /^https?:\/\//i.test(String(ACTIVE_NETWORK.rpcUrl || ""))) {
+        await window.ethereum.request({
+          method: "wallet_addEthereumChain",
+          params: [desiredChain],
+        });
+      }
+    } catch (error) {
+      // User may reject the update prompt; we still try to switch below.
+      if (error?.code === 4001) {
+        setStatus("MetaMask network update was skipped by user; trying chain switch with current settings.");
+      }
+    }
     try {
       await window.ethereum.request({
         method: "wallet_switchEthereumChain",
@@ -1432,14 +1522,7 @@ export default function UserPage() {
         try {
           await window.ethereum.request({
             method: "wallet_addEthereumChain",
-            params: [
-              {
-                chainId: ACTIVE_NETWORK.chainHex,
-                chainName: ACTIVE_NETWORK.chainName,
-                rpcUrls: [ACTIVE_NETWORK.rpcUrl],
-                nativeCurrency: { name: "ETH", symbol: "ETH", decimals: 18 },
-              },
-            ],
+            params: [desiredChain],
           });
           await window.ethereum.request({
             method: "wallet_switchEthereumChain",
@@ -2004,6 +2087,14 @@ export default function UserPage() {
     }
   }, [connectWallet]);
 
+  useEffect(() => {
+    loadFaucetInfo().catch(() => {});
+    const timer = setInterval(() => {
+      loadFaucetInfo().catch(() => {});
+    }, 60000);
+    return () => clearInterval(timer);
+  }, [loadFaucetInfo]);
+
   const referralLink = user ? `${window.location.origin}/?ref=${user.referralCode}` : "";
   const referralPairingNote = useMemo(() => {
     if (!walletAddress) return "";
@@ -2176,6 +2267,28 @@ export default function UserPage() {
               Connect Wallet
             </button>
           )}
+          {walletAddress && faucetInfo?.enabled ? (
+            <div
+              style={{
+                marginTop: "0.35rem",
+                display: "flex",
+                flexDirection: "column",
+                gap: "0.25rem",
+                alignItems: "flex-end",
+              }}
+            >
+              <button className="btn tiny ghost" disabled={faucetBusy} onClick={requestFaucet}>
+                {faucetBusy ? "Requesting..." : "Faucet"}
+              </button>
+              <span className={`muted ${faucetTone === "error" ? "danger" : faucetTone === "success" ? "success" : ""}`}>
+                {faucetMessage ||
+                  `Faucet: ${fmt(fmtTokenUnits(faucetInfo.ethWei || 0, 18), 6)} ETH + ${fmt(
+                    fmtTokenUnits(faucetInfo.usdc6 || 0, QUOTE_TOKEN_DECIMALS),
+                    2
+                  )} USD`}
+              </span>
+            </div>
+          ) : null}
         </div>
       </header>
 

@@ -68,6 +68,7 @@ async fn main() -> anyhow::Result<()> {
         user_service.clone(),
         env.events_poll_ms,
         sync_key,
+        env.chain_sync_from_block,
         cache.clone(),
         realtime.clone(),
     );

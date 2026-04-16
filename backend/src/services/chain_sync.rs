@@ -34,6 +34,7 @@ pub struct ChainSyncService {
     user_service: UserService,
     poll_ms: u64,
     state_key: String,
+    start_block: Option<u64>,
     cache: Arc<CacheService>,
     realtime: Arc<RealtimeHub>,
 }
@@ -45,6 +46,7 @@ impl ChainSyncService {
         user_service: UserService,
         poll_ms: u64,
         state_key: String,
+        start_block: Option<u64>,
         cache: Arc<CacheService>,
         realtime: Arc<RealtimeHub>,
     ) -> Arc<Self> {
@@ -54,12 +56,13 @@ impl ChainSyncService {
             user_service,
             poll_ms,
             state_key,
+            start_block,
             cache,
             realtime,
         })
     }
 
-    async fn get_checkpoint(&self) -> anyhow::Result<(u64, u64)> {
+    async fn get_checkpoint(&self) -> anyhow::Result<(u64, u64, bool)> {
         let block_key = format!("{}:last_block", self.state_key);
         let log_key = format!("{}:last_log", self.state_key);
         let block_val: Option<String> = sqlx::query_scalar(r#"SELECT value FROM "AppState" WHERE key = $1"#)
@@ -71,9 +74,11 @@ impl ChainSyncService {
             .fetch_optional(&self.pool)
             .await?;
 
+        let has_checkpoint = block_val.is_some() && log_val.is_some();
         Ok((
             block_val.and_then(|v| v.parse::<u64>().ok()).unwrap_or(0),
             log_val.and_then(|v| v.parse::<u64>().ok()).unwrap_or(0),
+            has_checkpoint,
         ))
     }
 
@@ -149,6 +154,21 @@ impl ChainSyncService {
                 .await
             {
                 tracing::warn!("[chain-sync] refresh open trade {} failed: {}", trade_id, e);
+            }
+        }
+        Ok(())
+    }
+
+    async fn refresh_recent_onchain_trades(&self, window: u64) -> anyhow::Result<()> {
+        let next_trade_id = self.makeit.next_trade_id().call().await?.as_u64();
+        if next_trade_id == 0 {
+            return Ok(());
+        }
+        let newest = next_trade_id.saturating_sub(1);
+        let start = newest.saturating_sub(window.saturating_sub(1));
+        for id in start..=newest {
+            if let Err(e) = self.upsert_trade(id as i64, None, None, None, None, None, None).await {
+                tracing::warn!("[chain-sync] refresh recent trade {} failed: {}", id, e);
             }
         }
         Ok(())
@@ -563,6 +583,9 @@ impl ChainSyncService {
                     if let Err(e) = self.refresh_existing_open_trades().await {
                         tracing::warn!("[chain-sync] open refresh failed: {}", e);
                     }
+                    if let Err(e) = self.refresh_recent_onchain_trades(200).await {
+                        tracing::warn!("[chain-sync] recent refresh failed: {}", e);
+                    }
                 }
             }
         });
@@ -570,11 +593,18 @@ impl ChainSyncService {
 
     async fn tick(&self) -> anyhow::Result<()> {
         let head = self.makeit.client().get_block_number().await?.as_u64();
-        let (mut last_block, mut last_log) = self.get_checkpoint().await?;
+        let (mut last_block, mut last_log, has_checkpoint) = self.get_checkpoint().await?;
+        let mut apply_log_skip = true;
 
-        if last_block == 0 {
-            last_block = head.saturating_sub(2);
+        if !has_checkpoint {
+            last_block = self.start_block.unwrap_or(0).min(head);
             last_log = 0;
+            apply_log_skip = false;
+            tracing::info!(
+                "[chain-sync] initializing checkpoint from block {} (head={})",
+                last_block,
+                head
+            );
         }
 
         if head < last_block {
@@ -597,6 +627,13 @@ impl ChainSyncService {
             .to_block(to_block)
             .query_with_meta()
             .await?;
+        tracing::info!(
+            "[chain-sync] events caught: opened={} closed={} range={}..{}",
+            opened.len(),
+            closed.len(),
+            last_block,
+            to_block
+        );
 
         #[derive(Clone)]
         enum IndexedEvent {
@@ -666,7 +703,7 @@ impl ChainSyncService {
                 } => (*trade_id, meta, Some(close.clone())),
             };
             let meta_block = meta_ref.block_number.as_u64();
-            if meta_block == last_block && meta_ref.log_index.as_u64() <= last_log {
+            if apply_log_skip && meta_block == last_block && meta_ref.log_index.as_u64() <= last_log {
                 continue;
             }
 
