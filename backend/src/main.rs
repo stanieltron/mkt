@@ -37,6 +37,11 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("[backend] DB migrations complete");
 
     tracing::info!("[backend] Connecting to RPC: {}", env.rpc_url);
+    if let Some(ws_url) = env.ws_rpc_url.as_ref() {
+        tracing::info!("[backend] WS fast-path enabled: {}", ws_url);
+    } else {
+        tracing::info!("[backend] WS fast-path disabled (using polling + checkpoint sync)");
+    }
     let provider = Arc::new(Provider::<Http>::try_from(env.rpc_url.as_str())?);
 
     let makeit_addr = Address::from_str(&env.makeit_address)?;
@@ -69,6 +74,7 @@ async fn main() -> anyhow::Result<()> {
         env.events_poll_ms,
         sync_key,
         env.chain_sync_from_block,
+        env.ws_rpc_url.clone(),
         cache.clone(),
         realtime.clone(),
     );

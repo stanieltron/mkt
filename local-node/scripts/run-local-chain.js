@@ -4,6 +4,7 @@
 const { spawn, spawnSync } = require("node:child_process");
 const http = require("node:http");
 const net = require("node:net");
+const WebSocket = require("ws");
 
 const root = process.cwd();
 const useShell = process.platform === "win32";
@@ -105,11 +106,36 @@ async function isAnvilRpc(url) {
   }
 }
 
+function checkWs(url, timeoutMs = 3000) {
+  return new Promise((resolvePromise, reject) => {
+    const ws = new WebSocket(url, { handshakeTimeout: timeoutMs });
+    const timeout = setTimeout(() => {
+      try {
+        ws.terminate();
+      } catch {}
+      reject(new Error(`timed out connecting to ${url}`));
+    }, timeoutMs + 500);
+
+    ws.once("open", () => {
+      clearTimeout(timeout);
+      try {
+        ws.close();
+      } catch {}
+      resolvePromise(true);
+    });
+    ws.once("error", (err) => {
+      clearTimeout(timeout);
+      reject(err);
+    });
+  });
+}
+
 async function main() {
   const anvilHost = process.env.ANVIL_HOST || "127.0.0.1";
   const anvilPort = Number(process.env.ANVIL_PORT || 8545);
   const anvilCheckHost = anvilHost === "0.0.0.0" ? "127.0.0.1" : anvilHost;
   const anvilRpcUrl = `http://${anvilCheckHost}:${anvilPort}`;
+  const anvilWsUrl = `ws://${anvilCheckHost}:${anvilPort}`;
 
   let anvilProcess = null;
 
@@ -138,6 +164,12 @@ async function main() {
     }
     console.log("[local-chain] Anvil is up");
   }
+  try {
+    await checkWs(anvilWsUrl, 3000);
+    console.log(`[local-chain] WS healthy: ${anvilWsUrl}`);
+  } catch (error) {
+    console.error(`[local-chain] WS health check failed: ${String(error?.message || error)}`);
+  }
 
   runStep("Deploying local contracts + env files", "node", ["scripts/deploy-local.js"], {
     env: {
@@ -148,6 +180,8 @@ async function main() {
   });
 
   console.log("[local-chain] local chain setup ready.");
+  console.log(`[local-chain] JSON-RPC (HTTP): ${anvilRpcUrl}`);
+  console.log(`[local-chain] JSON-RPC (WS):   ${anvilWsUrl}`);
   console.log("[local-chain] generated: local_deploy_rust/.env and e2e/.env");
 
   if (!anvilProcess) {

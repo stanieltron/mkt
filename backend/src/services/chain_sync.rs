@@ -6,9 +6,13 @@ use crate::services::realtime::RealtimeHub;
 use crate::services::user_service::UserService;
 use bigdecimal::BigDecimal;
 use chrono::Utc;
+use ethers::abi::RawLog;
 use ethers::contract::LogMeta;
-use ethers::providers::{Http, Middleware, Provider};
-use ethers::types::U256;
+use ethers::contract::EthLogDecode;
+use ethers::core::utils::keccak256;
+use ethers::providers::{Http, Middleware, Provider, Ws};
+use ethers::types::{Filter, H256, U256, ValueOrArray};
+use futures_util::StreamExt;
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -35,6 +39,7 @@ pub struct ChainSyncService {
     poll_ms: u64,
     state_key: String,
     start_block: Option<u64>,
+    ws_rpc_url: Option<String>,
     cache: Arc<CacheService>,
     realtime: Arc<RealtimeHub>,
 }
@@ -47,6 +52,7 @@ impl ChainSyncService {
         poll_ms: u64,
         state_key: String,
         start_block: Option<u64>,
+        ws_rpc_url: Option<String>,
         cache: Arc<CacheService>,
         realtime: Arc<RealtimeHub>,
     ) -> Arc<Self> {
@@ -57,9 +63,93 @@ impl ChainSyncService {
             poll_ms,
             state_key,
             start_block,
+            ws_rpc_url,
             cache,
             realtime,
         })
+    }
+
+    fn closed_event_data_from_filter(ev: &TradeClosedFilter) -> anyhow::Result<ClosedEventData> {
+        let close_reason = Self::close_reason_from_status_code(ev.status).to_string();
+        let settlement_action = if !ev.sold_weth_for_profit.is_zero() {
+            "SELL_WETH_FOR_PROFIT".to_string()
+        } else if !ev.bought_weth_on_sl.is_zero() {
+            "BUY_WETH_ON_SL".to_string()
+        } else if !ev.payout_usdc.is_zero() {
+            "USDC_POOL_PAYOUT".to_string()
+        } else {
+            "MARGIN_RETAINED".to_string()
+        };
+        Ok(ClosedEventData {
+            close_price_e18: BigDecimal::from_str(&ev.close_price_e18.to_string())?,
+            pnl_usdc6: BigDecimal::from_str(&ev.pnl_usdc.to_string())?,
+            sold_weth18: BigDecimal::from_str(&ev.sold_weth_for_profit.to_string())?,
+            bought_weth18: BigDecimal::from_str(&ev.bought_weth_on_sl.to_string())?,
+            payout_usdc6: BigDecimal::from_str(&ev.payout_usdc.to_string())?,
+            close_reason,
+            settlement_action,
+            settlement_usdc_amount: BigDecimal::from_str(&ev.payout_usdc.to_string())?,
+            settlement_weth_amount: if !ev.sold_weth_for_profit.is_zero() {
+                BigDecimal::from_str(&ev.sold_weth_for_profit.to_string())?
+            } else if !ev.bought_weth_on_sl.is_zero() {
+                BigDecimal::from_str(&ev.bought_weth_on_sl.to_string())?
+            } else {
+                BigDecimal::from(0)
+            },
+        })
+    }
+
+    async fn lookup_open_event_meta(
+        &self,
+        trade_id: i64,
+    ) -> anyhow::Result<Option<(String, i64, chrono::DateTime<Utc>)>> {
+        let events = self
+            .makeit
+            .event::<TradeOpenedFilter>()
+            .topic1(U256::from(trade_id as u64))
+            .from_block(0u64)
+            .query_with_meta()
+            .await?;
+        if let Some((_ev, meta)) = events.into_iter().next() {
+            let tx_hash = format!("{:#x}", meta.transaction_hash);
+            let block_number = meta.block_number.as_u64() as i64;
+            let block_ts = self
+                .makeit
+                .client()
+                .get_block(meta.block_number.as_u64())
+                .await?
+                .and_then(|b| chrono::DateTime::<Utc>::from_timestamp(b.timestamp.as_u64() as i64, 0))
+                .unwrap_or_else(Utc::now);
+            return Ok(Some((tx_hash, block_number, block_ts)));
+        }
+        Ok(None)
+    }
+
+    async fn lookup_close_event_meta(
+        &self,
+        trade_id: i64,
+    ) -> anyhow::Result<Option<(ClosedEventData, String, i64, chrono::DateTime<Utc>)>> {
+        let events = self
+            .makeit
+            .event::<TradeClosedFilter>()
+            .topic1(U256::from(trade_id as u64))
+            .from_block(0u64)
+            .query_with_meta()
+            .await?;
+        if let Some((ev, meta)) = events.into_iter().next() {
+            let tx_hash = format!("{:#x}", meta.transaction_hash);
+            let block_number = meta.block_number.as_u64() as i64;
+            let block_ts = self
+                .makeit
+                .client()
+                .get_block(meta.block_number.as_u64())
+                .await?
+                .and_then(|b| chrono::DateTime::<Utc>::from_timestamp(b.timestamp.as_u64() as i64, 0))
+                .unwrap_or_else(Utc::now);
+            let close_data = Self::closed_event_data_from_filter(&ev)?;
+            return Ok(Some((close_data, tx_hash, block_number, block_ts)));
+        }
+        Ok(None)
     }
 
     async fn get_checkpoint(&self) -> anyhow::Result<(u64, u64, bool)> {
@@ -172,6 +262,277 @@ impl ChainSyncService {
             }
         }
         Ok(())
+    }
+
+    async fn backfill_missing_trade_lifecycle(&self, limit: i64) -> anyhow::Result<()> {
+        let ids: Vec<i64> = sqlx::query_scalar(
+            r#"
+            SELECT "onChainTradeId"
+            FROM "Trade"
+            WHERE "onChainTradeId" > 0
+              AND (
+                "openTxHash" IS NULL
+                OR "openBlockNumber" IS NULL
+                OR (
+                    status <> 'OPEN'
+                    AND (
+                        "closeTxHash" IS NULL
+                        OR "closeBlockNumber" IS NULL
+                        OR "closedAt" IS NULL
+                        OR "payoutUsdc" IS NULL
+                        OR "settlementAction" IS NULL
+                        OR "settlementUsdcAmount" IS NULL
+                        OR "settlementWethAmount" IS NULL
+                    )
+                )
+              )
+            ORDER BY "onChainTradeId" ASC
+            LIMIT $1
+            "#,
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        for trade_id in ids {
+            if let Err(e) = self
+                .upsert_trade(trade_id, None, None, None, None, None, None)
+                .await
+            {
+                tracing::warn!(
+                    "[chain-sync] lifecycle backfill failed for trade {}: {}",
+                    trade_id,
+                    e
+                );
+            }
+        }
+        Ok(())
+    }
+
+    async fn process_trade_open_ws(
+        &self,
+        trade_id: i64,
+        tx_hash: H256,
+        log_index: i64,
+        block_number: i64,
+    ) -> anyhow::Result<()> {
+        let tx_hash_str = format!("{:#x}", tx_hash);
+        if self.is_processed(&tx_hash_str, log_index).await? {
+            return Ok(());
+        }
+
+        let closed_at_override = self
+            .makeit
+            .client()
+            .get_block(block_number as u64)
+            .await?
+            .and_then(|b| chrono::DateTime::<Utc>::from_timestamp(b.timestamp.as_u64() as i64, 0))
+            .unwrap_or_else(Utc::now);
+
+        let (wallet, trade_json, is_closed) = self
+            .upsert_trade(
+                trade_id,
+                Some(closed_at_override),
+                None,
+                Some(tx_hash_str.clone()),
+                Some(block_number),
+                None,
+                None,
+            )
+            .await?;
+        self.mark_processed(&tx_hash_str, log_index, block_number).await?;
+
+        tracing::info!(
+            "[chain-sync-ws] trade opened caught: tradeId={} wallet={} tx={} block={} logIndex={}",
+            trade_id,
+            wallet,
+            tx_hash_str,
+            block_number,
+            log_index
+        );
+
+        let event_name = if is_closed { "trade_closed" } else { "trade_upsert" };
+        let evt = self.realtime.make_event(
+            event_name,
+            Some(&wallet),
+            serde_json::json!({
+                "trade": trade_json,
+                "txHash": tx_hash_str,
+                "logIndex": log_index,
+                "blockNumber": block_number,
+            }),
+        );
+        self.realtime.publish_wallet(&wallet, &evt).await;
+        let _ = self
+            .cache
+            .publish_json(&format!("stream:user:{}", wallet.to_lowercase()), &evt)
+            .await;
+
+        Ok(())
+    }
+
+    async fn process_trade_close_ws(
+        &self,
+        trade_id: i64,
+        close: ClosedEventData,
+        tx_hash: H256,
+        log_index: i64,
+        block_number: i64,
+    ) -> anyhow::Result<()> {
+        let tx_hash_str = format!("{:#x}", tx_hash);
+        if self.is_processed(&tx_hash_str, log_index).await? {
+            return Ok(());
+        }
+
+        let closed_at_override = self
+            .makeit
+            .client()
+            .get_block(block_number as u64)
+            .await?
+            .and_then(|b| chrono::DateTime::<Utc>::from_timestamp(b.timestamp.as_u64() as i64, 0))
+            .unwrap_or_else(Utc::now);
+
+        let (wallet, trade_json, is_closed) = self
+            .upsert_trade(
+                trade_id,
+                Some(closed_at_override),
+                Some(close.clone()),
+                None,
+                None,
+                Some(tx_hash_str.clone()),
+                Some(block_number),
+            )
+            .await?;
+        self.mark_processed(&tx_hash_str, log_index, block_number).await?;
+
+        tracing::info!(
+            "[chain-sync-ws] trade closed caught: tradeId={} wallet={} reason={} tx={} block={} logIndex={}",
+            trade_id,
+            wallet,
+            close.close_reason,
+            tx_hash_str,
+            block_number,
+            log_index
+        );
+
+        let event_name = if is_closed { "trade_closed" } else { "trade_upsert" };
+        let evt = self.realtime.make_event(
+            event_name,
+            Some(&wallet),
+            serde_json::json!({
+                "trade": trade_json,
+                "txHash": tx_hash_str,
+                "logIndex": log_index,
+                "blockNumber": block_number,
+            }),
+        );
+        self.realtime.publish_wallet(&wallet, &evt).await;
+        let _ = self
+            .cache
+            .publish_json(&format!("stream:user:{}", wallet.to_lowercase()), &evt)
+            .await;
+
+        Ok(())
+    }
+
+    async fn run_ws_listener(&self, ws: Ws) -> anyhow::Result<()> {
+        let provider = Provider::new(ws);
+        let opened_sig = H256::from(keccak256(
+            "TradeOpened(uint256,address,uint8,uint32,uint256,uint256,uint256,uint32,uint256,uint256)",
+        ));
+        let closed_sig = H256::from(keccak256(
+            "TradeClosed(uint256,address,uint8,uint8,uint256,uint32,uint256,int256,uint256,uint256)",
+        ));
+        let filter = Filter::new()
+            .address(ValueOrArray::Value(self.makeit.address()))
+            .topic0(ValueOrArray::Array(vec![opened_sig, closed_sig]));
+
+        let mut stream = provider.subscribe_logs(&filter).await?;
+        tracing::info!(
+            "[chain-sync-ws] healthy: subscribed url={} contract={:#x}",
+            self.ws_rpc_url.clone().unwrap_or_default(),
+            self.makeit.address()
+        );
+
+        while let Some(log) = stream.next().await {
+            let topic0 = match log.topics.first().copied() {
+                Some(t) => t,
+                None => continue,
+            };
+            let tx_hash = match log.transaction_hash {
+                Some(h) => h,
+                None => continue,
+            };
+            let block_number = match log.block_number {
+                Some(n) => n.as_u64() as i64,
+                None => continue,
+            };
+            let log_index = match log.log_index {
+                Some(n) => n.as_u64() as i64,
+                None => continue,
+            };
+
+            let raw = RawLog {
+                topics: log.topics.clone(),
+                data: log.data.0.to_vec(),
+            };
+
+            if topic0 == opened_sig {
+                match TradeOpenedFilter::decode_log(&raw) {
+                    Ok(ev) => {
+                        let trade_id = ev.trade_id.as_u64() as i64;
+                        if let Err(e) = self
+                            .process_trade_open_ws(trade_id, tx_hash, log_index, block_number)
+                            .await
+                        {
+                            tracing::warn!("[chain-sync-ws] open process failed: {}", e);
+                        }
+                    }
+                    Err(e) => tracing::warn!("[chain-sync-ws] decode open failed: {}", e),
+                }
+                continue;
+            }
+
+            if topic0 == closed_sig {
+                match TradeClosedFilter::decode_log(&raw) {
+                    Ok(ev) => match Self::closed_event_data_from_filter(&ev) {
+                        Ok(close) => {
+                            let trade_id = ev.trade_id.as_u64() as i64;
+                            if let Err(e) = self
+                                .process_trade_close_ws(trade_id, close, tx_hash, log_index, block_number)
+                                .await
+                            {
+                                tracing::warn!("[chain-sync-ws] close process failed: {}", e);
+                            }
+                        }
+                        Err(e) => tracing::warn!("[chain-sync-ws] close event map failed: {}", e),
+                    },
+                    Err(e) => tracing::warn!("[chain-sync-ws] decode close failed: {}", e),
+                }
+            }
+        }
+        anyhow::bail!("ws stream ended")
+    }
+
+    fn start_ws_listener(self: Arc<Self>) {
+        let ws_url = match self.ws_rpc_url.clone() {
+            Some(v) => v,
+            None => return,
+        };
+        tokio::spawn(async move {
+            loop {
+                match Ws::connect(ws_url.clone()).await {
+                    Ok(ws) => {
+                        tracing::info!("[chain-sync-ws] connected: {}", ws_url);
+                        if let Err(e) = self.run_ws_listener(ws).await {
+                            tracing::error!("[chain-sync-ws] listener error: {}", e);
+                        }
+                    }
+                    Err(e) => tracing::error!("[chain-sync-ws] connect failed ({}): {}", ws_url, e),
+                }
+                tokio::time::sleep(Duration::from_secs(3)).await;
+            }
+        });
     }
 
     pub async fn sync_trade(&self, trade_id: i64) -> anyhow::Result<()> {
@@ -319,6 +680,12 @@ impl ChainSyncService {
         close_block_number: Option<i64>,
     ) -> anyhow::Result<(String, serde_json::Value, bool)> {
         let data = self.makeit.get_trade(U256::from(trade_id as u64)).call().await?;
+        let mut open_tx_hash = open_tx_hash;
+        let mut open_block_number = open_block_number;
+        let mut close_tx_hash = close_tx_hash;
+        let mut close_block_number = close_block_number;
+        let mut closed_at_override = closed_at_override;
+        let mut closed_event = closed_event;
 
         let trader = format!("{:#x}", data.0);
         let side = data.1;
@@ -332,6 +699,36 @@ impl ChainSyncService {
         let sl_bd: BigDecimal = BigDecimal::from_str(&data.10.to_string())?;
 
         let direction = if side == 1 { "SHORT" } else { "LONG" };
+        if open_tx_hash.is_none() || open_block_number.is_none() {
+            if let Some((open_tx, open_block, _opened_ts)) = self.lookup_open_event_meta(trade_id).await? {
+                if open_tx_hash.is_none() {
+                    open_tx_hash = Some(open_tx);
+                }
+                if open_block_number.is_none() {
+                    open_block_number = Some(open_block);
+                }
+            }
+        }
+
+        if status_u8 != 0 && (closed_event.is_none() || close_tx_hash.is_none() || close_block_number.is_none()) {
+            if let Some((close_data, close_tx, close_block, closed_ts)) =
+                self.lookup_close_event_meta(trade_id).await?
+            {
+                if closed_event.is_none() {
+                    closed_event = Some(close_data);
+                }
+                if close_tx_hash.is_none() {
+                    close_tx_hash = Some(close_tx);
+                }
+                if close_block_number.is_none() {
+                    close_block_number = Some(close_block);
+                }
+                if closed_at_override.is_none() {
+                    closed_at_override = Some(closed_ts);
+                }
+            }
+        }
+
         let mut status_str = match status_u8 {
             0 => "OPEN",
             1 | 2 => "LIQUIDATED",
@@ -569,6 +966,7 @@ impl ChainSyncService {
     }
 
     pub fn start(self: Arc<Self>) {
+        self.clone().start_ws_listener();
         tokio::spawn(async move {
             let mut ticker = interval(Duration::from_millis(self.poll_ms));
             let mut refresh_counter: u32 = 0;
@@ -585,6 +983,9 @@ impl ChainSyncService {
                     }
                     if let Err(e) = self.refresh_recent_onchain_trades(200).await {
                         tracing::warn!("[chain-sync] recent refresh failed: {}", e);
+                    }
+                    if let Err(e) = self.backfill_missing_trade_lifecycle(200).await {
+                        tracing::warn!("[chain-sync] lifecycle backfill failed: {}", e);
                     }
                 }
             }
@@ -653,36 +1054,11 @@ impl ChainSyncService {
             });
         }
         for (ev, meta) in closed {
-            let close_reason = Self::close_reason_from_status_code(ev.status).to_string();
-            let settlement_action = if !ev.sold_weth_for_profit.is_zero() {
-                "SELL_WETH_FOR_PROFIT".to_string()
-            } else if !ev.bought_weth_on_sl.is_zero() {
-                "BUY_WETH_ON_SL".to_string()
-            } else if !ev.payout_usdc.is_zero() {
-                "USDC_POOL_PAYOUT".to_string()
-            } else {
-                "MARGIN_RETAINED".to_string()
-            };
+            let close_data = Self::closed_event_data_from_filter(&ev)?;
             events.push(IndexedEvent::Closed {
                 trade_id: ev.trade_id.as_u64() as i64,
                 meta,
-                close: ClosedEventData {
-                    close_price_e18: BigDecimal::from_str(&ev.close_price_e18.to_string())?,
-                    pnl_usdc6: BigDecimal::from_str(&ev.pnl_usdc.to_string())?,
-                    sold_weth18: BigDecimal::from_str(&ev.sold_weth_for_profit.to_string())?,
-                    bought_weth18: BigDecimal::from_str(&ev.bought_weth_on_sl.to_string())?,
-                    payout_usdc6: BigDecimal::from_str(&ev.payout_usdc.to_string())?,
-                    close_reason,
-                    settlement_action,
-                    settlement_usdc_amount: BigDecimal::from_str(&ev.payout_usdc.to_string())?,
-                    settlement_weth_amount: if !ev.sold_weth_for_profit.is_zero() {
-                        BigDecimal::from_str(&ev.sold_weth_for_profit.to_string())?
-                    } else if !ev.bought_weth_on_sl.is_zero() {
-                        BigDecimal::from_str(&ev.bought_weth_on_sl.to_string())?
-                    } else {
-                        BigDecimal::from(0)
-                    },
-                },
+                close: close_data,
             });
         }
 

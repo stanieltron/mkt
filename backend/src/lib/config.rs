@@ -5,6 +5,7 @@ use std::env;
 pub struct Env {
     pub port: u16,
     pub rpc_url: String,
+    pub ws_rpc_url: Option<String>,
     pub chain_id: u64,
     pub database_url: String,
     pub makeit_address: String,
@@ -35,6 +36,9 @@ impl Env {
                 .filter(|v| !v.is_empty())
                 .or_else(|| env::var("RPC_URL").ok().filter(|v| !v.is_empty()))
                 .context("BACKEND_RPC_URL or RPC_URL required")?,
+            ws_rpc_url: env::var("BACKEND_WS_RPC_URL")
+                .ok()
+                .filter(|v| !v.is_empty()),
             chain_id: env::var("CHAIN_ID").unwrap_or_else(|_| "31337".into()).parse().unwrap_or(31337),
             database_url: env::var("DATABASE_URL").context("DATABASE_URL required")?,
             makeit_address: env::var("MAKEIT_ADDRESS").context("MAKEIT_ADDRESS required")?,
